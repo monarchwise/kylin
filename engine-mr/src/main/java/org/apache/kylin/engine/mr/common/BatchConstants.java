@@ -63,6 +63,8 @@ public interface BatchConstants {
     String CFG_OUTPUT_DICT = "dict";
     String CFG_OUTPUT_STATISTICS = "statistics";
     String CFG_OUTPUT_PARTITION = "partition";
+    
+    String CFG_GLOBAL_DICT_BASE_DIR = "global.dict.base.dir";
 
     /**
      * command line ARGuments
@@ -82,6 +84,8 @@ public interface BatchConstants {
     String ARG_HTABLE_NAME = "htablename";
     String ARG_INPUT_FORMAT = "inputformat";
     String ARG_LEVEL = "level";
+    String ARG_DICT_PATH = "dictPath";
+
 
     /**
      * logger and counter
