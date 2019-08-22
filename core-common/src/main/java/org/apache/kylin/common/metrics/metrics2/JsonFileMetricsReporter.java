@@ -22,6 +22,7 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -51,7 +52,7 @@ public class JsonFileMetricsReporter implements CodahaleReporter {
     private final ObjectWriter jsonWriter;
     private final ScheduledExecutorService executorService;
     private final KylinConfig conf;
-    private final long interval;
+    private final long frequency;
     private final String pathString;
     private final Path path;
 
@@ -63,8 +64,8 @@ public class JsonFileMetricsReporter implements CodahaleReporter {
         executorService = Executors.newSingleThreadScheduledExecutor();
         this.conf = conf;
 
-        interval = KylinConfig.getInstanceFromEnv().getJsonFileMetricsReporterInterval();
-        pathString = KylinConfig.getInstanceFromEnv().getMetricFileLocation();
+        frequency = KylinConfig.getInstanceFromEnv().getMetricsReporterFrequency();
+        pathString = KylinConfig.getInstanceFromEnv().getMetricsFileLocation();
         path = new Path(pathString);
     }
 
@@ -97,19 +98,15 @@ public class JsonFileMetricsReporter implements CodahaleReporter {
                         return;
                     }
 
-                    BufferedWriter bw = null;
-                    try {
-                        fs.delete(tmpPath, true);
-                        bw = new BufferedWriter(new OutputStreamWriter(fs.create(tmpPath, true)));
+                    fs.delete(tmpPath, true);
+
+                    try (BufferedWriter bw = new BufferedWriter(
+                            new OutputStreamWriter(fs.create(tmpPath, true), StandardCharsets.UTF_8))) {
                         bw.write(json);
                         fs.setPermission(tmpPath, FsPermission.createImmutable((short) 0644));
                     } catch (IOException e) {
                         LOGGER.error("Unable to write to temp file " + tmpPath, e);
                         return;
-                    } finally {
-                        if (bw != null) {
-                            bw.close();
-                        }
                     }
 
                     try {
@@ -126,7 +123,7 @@ public class JsonFileMetricsReporter implements CodahaleReporter {
             }
         };
 
-        executorService.scheduleWithFixedDelay(task, 0, interval, TimeUnit.MILLISECONDS);
+        executorService.scheduleWithFixedDelay(task, 0, frequency, TimeUnit.MILLISECONDS);
     }
 
     @Override

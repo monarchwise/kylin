@@ -26,6 +26,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -50,7 +51,7 @@ import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.KylinVersion;
 import org.apache.kylin.common.util.Bytes;
-import org.apache.kylin.common.util.HadoopUtil;
+import org.apache.kylin.common.util.Pair;
 import org.apache.kylin.cube.CubeInstance;
 import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.CubeSegment;
@@ -65,9 +66,11 @@ import org.apache.kylin.storage.hbase.HBaseConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 
 /**
+ *
  */
 public class DeployCoprocessorCLI {
 
@@ -80,69 +83,129 @@ public class DeployCoprocessorCLI {
     private static final Logger logger = LoggerFactory.getLogger(DeployCoprocessorCLI.class);
 
     public static void main(String[] args) throws IOException {
+        KylinConfig kylinConfig = KylinConfig.getInstanceFromEnv();
+        Configuration hconf = HBaseConnection.getCurrentHBaseConfiguration();
+        FileSystem fileSystem = FileSystem.get(hconf);
+        Connection conn = HBaseConnection.get(kylinConfig.getStorageUrl());
+        Admin hbaseAdmin = null;
+        DeployCoprocessorCLIOps ops = parseArgs(args);
+
+        try {
+            hbaseAdmin = conn.getAdmin();
+            String localCoprocessorJar;
+            if ("default".equals(ops.getLocalCoprocessorJar())) {
+                localCoprocessorJar = kylinConfig.getCoprocessorLocalJar();
+            } else {
+                localCoprocessorJar = new File(ops.getLocalCoprocessorJar()).getAbsolutePath();
+            }
+            logger.info("Identify coprocessor jar " + localCoprocessorJar);
+            logger.info("Use at most {} threads to do upgrade", ops.getMaxThreads());
+
+            List<String> tableNames = getHTableNames(kylinConfig);
+            logger.info("Identify tables " + tableNames);
+
+            String filterType = ops.getFilterType().toLowerCase(Locale.ROOT);
+            if (filterType.equals("-table")) {
+                tableNames = filterByTables(tableNames, Arrays.asList(ops.getEntities()));
+            } else if (filterType.equals("-cube")) {
+                tableNames = filterByCubes(tableNames, Arrays.asList(ops.getEntities()));
+            } else if (filterType.equals("-project")) {
+                tableNames = filterByProjects(tableNames, Arrays.asList(ops.getEntities()));
+            } else if (!filterType.equals("all")) {
+                printUsageAndExit();
+            }
+            logger.info("Tables after filtering by type " + filterType + ": " + tableNames);
+
+            tableNames = filterByGitCommit(hbaseAdmin, tableNames);
+            logger.info("Will execute tables " + tableNames);
+
+            long start = System.currentTimeMillis();
+
+            Set<String> oldJarPaths = getCoprocessorJarPaths(hbaseAdmin, tableNames);
+            logger.info("Old coprocessor jar: " + oldJarPaths);
+
+            Path hdfsCoprocessorJar = uploadCoprocessorJar(localCoprocessorJar, fileSystem, oldJarPaths);
+            logger.info("New coprocessor jar: " + hdfsCoprocessorJar);
+
+            Pair<List<String>, List<String>> results = resetCoprocessorOnHTables(hbaseAdmin, hdfsCoprocessorJar,
+                    tableNames, ops.getMaxThreads());
+
+            // Don't remove old jars, missing coprocessor jar will fail hbase
+            // removeOldJars(oldJarPaths, fileSystem);
+
+            logger.info("Processed time: " + (System.currentTimeMillis() - start));
+            logger.info("Processed tables count: " + results.getFirst().size());
+            logger.info("Processed tables: " + results.getFirst());
+            logger.error("Failed tables count: " + results.getSecond().size());
+            logger.error("Failed tables : " + results.getSecond());
+            logger.info("Active coprocessor jar: " + hdfsCoprocessorJar);
+        } finally {
+            if (hbaseAdmin != null) {
+                hbaseAdmin.close();
+            }
+        }
+    }
+
+    @VisibleForTesting
+    static DeployCoprocessorCLIOps parseArgs(String[] args) {
+        String localCoprocessorJar;
+        int maxThreads = 8;
+        String filterType;
+        String[] entities;
 
         if (args == null || args.length <= 1) {
             printUsageAndExit();
-        }
-
-        KylinConfig kylinConfig = KylinConfig.getInstanceFromEnv();
-        Configuration hconf = HBaseConnection.getCurrentHBaseConfiguration();
-        FileSystem fileSystem = HadoopUtil.getWorkingFileSystem(hconf);
-        Connection conn = HBaseConnection.get(kylinConfig.getStorageUrl());
-        Admin hbaseAdmin = conn.getAdmin();
-
-        String localCoprocessorJar;
-        if ("default".equals(args[0])) {
-            localCoprocessorJar = kylinConfig.getCoprocessorLocalJar();
+            return null;
+        } else if (StringUtils.isNumeric(args[1])) {
+            maxThreads = Integer.parseInt(args[1]);
+            filterType = args[2];
+            entities = Arrays.copyOfRange(args, 3, args.length);
         } else {
-            localCoprocessorJar = new File(args[0]).getAbsolutePath();
+            filterType = args[1];
+            entities = Arrays.copyOfRange(args, 2, args.length);
         }
 
-        logger.info("Identify coprocessor jar " + localCoprocessorJar);
-
-        List<String> tableNames = getHTableNames(kylinConfig);
-        logger.info("Identify tables " + tableNames);
-
-        String filterType = args[1].toLowerCase();
-        if (filterType.equals("-table")) {
-            tableNames = filterByTables(tableNames, Arrays.asList(args).subList(2, args.length));
-        } else if (filterType.equals("-cube")) {
-            tableNames = filterByCubes(tableNames, Arrays.asList(args).subList(2, args.length));
-        } else if (filterType.equals("-project")) {
-            tableNames = filterByProjects(tableNames, Arrays.asList(args).subList(2, args.length));
-        } else if (!filterType.equals("all")) {
+        localCoprocessorJar = args[0];
+        if (StringUtils.isEmpty(localCoprocessorJar) || StringUtils.isEmpty(filterType)) {
             printUsageAndExit();
         }
 
-        logger.info("Will execute tables " + tableNames);
-        long start = System.currentTimeMillis();
-
-        Set<String> oldJarPaths = getCoprocessorJarPaths(hbaseAdmin, tableNames);
-        logger.info("Old coprocessor jar: " + oldJarPaths);
-
-        Path hdfsCoprocessorJar = uploadCoprocessorJar(localCoprocessorJar, fileSystem, oldJarPaths);
-        logger.info("New coprocessor jar: " + hdfsCoprocessorJar);
-
-        List<String> processedTables = resetCoprocessorOnHTables(hbaseAdmin, hdfsCoprocessorJar, tableNames);
-
-        // Don't remove old jars, missing coprocessor jar will fail hbase
-        // removeOldJars(oldJarPaths, fileSystem);
-
-        hbaseAdmin.close();
-
-        logger.info("Processed time: " + (System.currentTimeMillis() - start));
-        logger.info("Processed tables count: " + processedTables.size());
-        logger.info("Processed tables: " + processedTables);
-        logger.info("Active coprocessor jar: " + hdfsCoprocessorJar);
+        return new DeployCoprocessorCLIOps(localCoprocessorJar, maxThreads, filterType, entities);
     }
 
     private static void printUsageAndExit() {
         logger.info("Usage: ");
-        logger.info("$KYLIN_HOME/bin/kylin.sh  org.apache.kylin.storage.hbase.util.DeployCoprocessorCLI $KYLIN_HOME/lib/kylin-coprocessor-*.jar all");
-        logger.info("$KYLIN_HOME/bin/kylin.sh  org.apache.kylin.storage.hbase.util.DeployCoprocessorCLI $KYLIN_HOME/lib/kylin-coprocessor-*.jar -table tableName1 tableName2 ...");
-        logger.info("$KYLIN_HOME/bin/kylin.sh  org.apache.kylin.storage.hbase.util.DeployCoprocessorCLI $KYLIN_HOME/lib/kylin-coprocessor-*.jar -cube cubeName1 cubeName2 ... ");
-        logger.info("$KYLIN_HOME/bin/kylin.sh  org.apache.kylin.storage.hbase.util.DeployCoprocessorCLI $KYLIN_HOME/lib/kylin-coprocessor-*.jar -project projectName1 projectName2 ...");
+        logger.info(
+                "$KYLIN_HOME/bin/kylin.sh  org.apache.kylin.storage.hbase.util.DeployCoprocessorCLI $KYLIN_HOME/lib/kylin-coprocessor-*.jar [nOfThread] all");
+        logger.info(
+                "$KYLIN_HOME/bin/kylin.sh  org.apache.kylin.storage.hbase.util.DeployCoprocessorCLI $KYLIN_HOME/lib/kylin-coprocessor-*.jar [nOfThread] -table tableName1 tableName2 ...");
+        logger.info(
+                "$KYLIN_HOME/bin/kylin.sh  org.apache.kylin.storage.hbase.util.DeployCoprocessorCLI $KYLIN_HOME/lib/kylin-coprocessor-*.jar [nOfThread] -cube cubeName1 cubeName2 ... ");
+        logger.info(
+                "$KYLIN_HOME/bin/kylin.sh  org.apache.kylin.storage.hbase.util.DeployCoprocessorCLI $KYLIN_HOME/lib/kylin-coprocessor-*.jar [nOfThread] -project projectName1 projectName2 ...");
         System.exit(0);
+    }
+
+    private static List<String> filterByGitCommit(Admin hbaseAdmin, List<String> tableNames) throws IOException {
+        List<String> result = Lists.newLinkedList();
+        List<String> filteredList = Lists.newLinkedList();
+
+        String commitInfo = KylinVersion.getGitCommitInfo();
+        if (StringUtils.isEmpty(commitInfo)) {
+            return tableNames;
+        }
+        logger.info("Commit Information: " + commitInfo);
+        for (String tableName : tableNames) {
+            HTableDescriptor tableDesc = hbaseAdmin.getTableDescriptor(TableName.valueOf(tableName));
+            String gitTag = tableDesc.getValue(IRealizationConstants.HTableGitTag);
+            if (commitInfo.equals(gitTag)) {
+                filteredList.add(tableName);
+            } else {
+                result.add(tableName);
+            }
+        }
+        logger.info("Filtered tables don't need to deploy coprocessors: " + filteredList);
+        return result;
     }
 
     private static List<String> filterByProjects(List<String> allTableNames, List<String> projectNames) {
@@ -158,7 +221,7 @@ public class DeployCoprocessorCLI {
 
             ProjectInstance projectInstance = projectManager.getProject(p);
             List<RealizationEntry> cubeList = projectInstance.getRealizationEntries(RealizationType.CUBE);
-            for (RealizationEntry cube: cubeList) {
+            for (RealizationEntry cube : cubeList) {
                 CubeInstance cubeInstance = cubeManager.getCube(cube.getRealization());
                 for (CubeSegment segment : cubeInstance.getSegments()) {
                     String tableName = segment.getStorageLocationIdentifier();
@@ -218,7 +281,7 @@ public class DeployCoprocessorCLI {
     private static void initHTableCoprocessor(HTableDescriptor desc) throws IOException {
         KylinConfig kylinConfig = KylinConfig.getInstanceFromEnv();
         Configuration hconf = HBaseConnection.getCurrentHBaseConfiguration();
-        FileSystem fileSystem = HadoopUtil.getWorkingFileSystem(hconf);
+        FileSystem fileSystem = FileSystem.get(hconf);
 
         String localCoprocessorJar = kylinConfig.getCoprocessorLocalJar();
         Path hdfsCoprocessorJar = DeployCoprocessorCLI.uploadCoprocessorJar(localCoprocessorJar, fileSystem, null);
@@ -231,7 +294,8 @@ public class DeployCoprocessorCLI {
         desc.addCoprocessor(CubeEndpointClass, hdfsCoprocessorJar, 1001, null);
     }
 
-    public static boolean resetCoprocessor(String tableName, Admin hbaseAdmin, Path hdfsCoprocessorJar) throws IOException {
+    public static boolean resetCoprocessor(String tableName, Admin hbaseAdmin, Path hdfsCoprocessorJar)
+            throws IOException {
         KylinConfig kylinConfig = KylinConfig.getInstanceFromEnv();
         HTableDescriptor desc = hbaseAdmin.getTableDescriptor(TableName.valueOf(tableName));
 
@@ -246,7 +310,9 @@ public class DeployCoprocessorCLI {
         logger.info("reset coprocessor on " + tableName);
 
         logger.info("Disable " + tableName);
-        hbaseAdmin.disableTable(TableName.valueOf(tableName));
+        if (hbaseAdmin.isTableEnabled(TableName.valueOf(tableName))) {
+            hbaseAdmin.disableTable(TableName.valueOf(tableName));
+        }
 
         while (desc.hasCoprocessor(CubeObserverClassOld2)) {
             desc.removeCoprocessor(CubeObserverClassOld2);
@@ -280,13 +346,22 @@ public class DeployCoprocessorCLI {
         return true;
     }
 
-    private static List<String> resetCoprocessorOnHTables(final Admin hbaseAdmin, final Path hdfsCoprocessorJar, List<String> tableNames) throws IOException {
+    private static Pair<List<String>, List<String>> resetCoprocessorOnHTables(final Admin hbaseAdmin,
+            final Path hdfsCoprocessorJar, List<String> tableNames, int maxThreads) throws IOException {
         List<String> processedTables = Collections.synchronizedList(new ArrayList<String>());
-        ExecutorService coprocessorPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 2);
+        List<String> failedTables = Collections.synchronizedList(new ArrayList<String>());
+
+        int nThread = Runtime.getRuntime().availableProcessors() * 2;
+        if (nThread > maxThreads) {
+            nThread = maxThreads;
+        }
+        logger.info("Use {} threads to do upgrade", nThread);
+        ExecutorService coprocessorPool = Executors.newFixedThreadPool(nThread);
         CountDownLatch countDownLatch = new CountDownLatch(tableNames.size());
 
         for (final String tableName : tableNames) {
-            coprocessorPool.execute(new ResetCoprocessorWorker(countDownLatch, hbaseAdmin, hdfsCoprocessorJar, tableName, processedTables));
+            coprocessorPool.execute(new ResetCoprocessorWorker(countDownLatch, hbaseAdmin, hdfsCoprocessorJar,
+                    tableName, processedTables, failedTables));
         }
 
         try {
@@ -296,7 +371,7 @@ public class DeployCoprocessorCLI {
         }
 
         coprocessorPool.shutdown();
-        return processedTables;
+        return new Pair<>(processedTables, failedTables);
     }
 
     private static class ResetCoprocessorWorker implements Runnable {
@@ -305,13 +380,17 @@ public class DeployCoprocessorCLI {
         private final Path hdfsCoprocessorJar;
         private final String tableName;
         private final List<String> processedTables;
+        private final List<String> failedTables;
 
-        public ResetCoprocessorWorker(CountDownLatch countDownLatch, Admin hbaseAdmin, Path hdfsCoprocessorJar, String tableName, List<String> processedTables) {
+        public ResetCoprocessorWorker(CountDownLatch countDownLatch, Admin hbaseAdmin, Path hdfsCoprocessorJar,
+                String tableName, List<String> processedTables, List<String> failedTables) {
+
             this.countDownLatch = countDownLatch;
             this.hbaseAdmin = hbaseAdmin;
             this.hdfsCoprocessorJar = hdfsCoprocessorJar;
             this.tableName = tableName;
             this.processedTables = processedTables;
+            this.failedTables = failedTables;
         }
 
         @Override
@@ -320,8 +399,11 @@ public class DeployCoprocessorCLI {
                 boolean isProcessed = resetCoprocessor(tableName, hbaseAdmin, hdfsCoprocessorJar);
                 if (isProcessed) {
                     processedTables.add(tableName);
+                } else {
+                    failedTables.add(tableName);
                 }
             } catch (Exception ex) {
+                failedTables.add(tableName);
                 logger.error("Error processing " + tableName, ex);
             } finally {
                 countDownLatch.countDown();
@@ -351,7 +433,8 @@ public class DeployCoprocessorCLI {
         return path;
     }
 
-    public synchronized static Path uploadCoprocessorJar(String localCoprocessorJar, FileSystem fileSystem, Set<String> oldJarPaths) throws IOException {
+    public static synchronized Path uploadCoprocessorJar(String localCoprocessorJar, FileSystem fileSystem,
+            Set<String> oldJarPaths) throws IOException {
         Path uploadPath = null;
         File localCoprocessorFile = new File(localCoprocessorJar);
 
@@ -409,7 +492,8 @@ public class DeployCoprocessorCLI {
     }
 
     private static boolean isSame(File localCoprocessorFile, FileStatus fileStatus) {
-        return fileStatus.getLen() == localCoprocessorFile.length() && fileStatus.getModificationTime() == localCoprocessorFile.lastModified();
+        return fileStatus.getLen() == localCoprocessorFile.length()
+                && fileStatus.getModificationTime() == localCoprocessorFile.lastModified();
     }
 
     private static String getBaseFileName(String localCoprocessorJar) {
@@ -467,7 +551,9 @@ public class DeployCoprocessorCLI {
 
         ArrayList<String> result = new ArrayList<String>();
         for (CubeInstance cube : cubeMgr.listAllCubes()) {
-            if (cube.getStorageType() == IStorageAware.ID_HBASE || cube.getStorageType() == IStorageAware.ID_SHARDED_HBASE) {
+            if (cube.getStorageType() == IStorageAware.ID_HBASE
+                    || cube.getStorageType() == IStorageAware.ID_SHARDED_HBASE
+                    || cube.getStorageType() == IStorageAware.ID_REALTIME_AND_HBASE) {
                 for (CubeSegment seg : cube.getSegments(SegmentStatusEnum.READY)) {
                     String tableName = seg.getStorageLocationIdentifier();
                     if (StringUtils.isBlank(tableName) == false) {

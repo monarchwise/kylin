@@ -20,10 +20,11 @@ package org.apache.kylin.cube.model;
 
 import java.io.Serializable;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
-import org.apache.kylin.common.util.BytesSplitter;
 import org.apache.kylin.cube.CubeSegment;
+import org.apache.kylin.metadata.MetadataConstants;
 import org.apache.kylin.metadata.model.DataModelDesc;
 import org.apache.kylin.metadata.model.FunctionDesc;
 import org.apache.kylin.metadata.model.IJoinedFlatTableDesc;
@@ -41,34 +42,47 @@ import com.google.common.collect.Maps;
 @SuppressWarnings("serial")
 public class CubeJoinedFlatTableDesc implements IJoinedFlatTableDesc, Serializable {
 
-    protected final String tableName;
+    protected String tableName;
     protected final CubeDesc cubeDesc;
     protected final CubeSegment cubeSegment;
+    protected final boolean includingDerived;
 
     private int columnCount = 0;
     private List<TblColRef> columnList = Lists.newArrayList();
     private Map<TblColRef, Integer> columnIndexMap = Maps.newHashMap();
 
     public CubeJoinedFlatTableDesc(CubeDesc cubeDesc) {
-        this(cubeDesc, null);
+        this(cubeDesc, null, false);
+    }
+
+    public CubeJoinedFlatTableDesc(CubeDesc cubeDesc, boolean includingDerived) {
+        this(cubeDesc, null, includingDerived);
     }
 
     public CubeJoinedFlatTableDesc(CubeSegment cubeSegment) {
-        this(cubeSegment.getCubeDesc(), cubeSegment);
+        this(cubeSegment.getCubeDesc(), cubeSegment, false);
     }
 
-    private CubeJoinedFlatTableDesc(CubeDesc cubeDesc, CubeSegment cubeSegment /* can be null */) {
+    public CubeJoinedFlatTableDesc(CubeSegment cubeSegment, boolean includingDerived) {
+        this(cubeSegment.getCubeDesc(), cubeSegment, includingDerived);
+    }
+    
+    private CubeJoinedFlatTableDesc(CubeDesc cubeDesc, CubeSegment cubeSegment /* can be null */,
+            boolean includingDerived) {
         this.cubeDesc = cubeDesc;
         this.cubeSegment = cubeSegment;
+
         this.tableName = makeTableName(cubeDesc, cubeSegment);
+        this.includingDerived = includingDerived;
         initParseCubeDesc();
     }
 
     protected String makeTableName(CubeDesc cubeDesc, CubeSegment cubeSegment) {
         if (cubeSegment == null) {
-            return "kylin_intermediate_" + cubeDesc.getName().toLowerCase();
+            return MetadataConstants.KYLIN_INTERMEDIATE_PREFIX + cubeDesc.getName().toLowerCase(Locale.ROOT);
         } else {
-            return "kylin_intermediate_" + cubeDesc.getName().toLowerCase() + "_" + cubeSegment.getUuid().replaceAll("-", "_");
+            return MetadataConstants.KYLIN_INTERMEDIATE_PREFIX + cubeDesc.getName().toLowerCase(Locale.ROOT) + "_"
+                    + cubeSegment.getUuid().replaceAll("-", "_");
         }
     }
 
@@ -86,8 +100,14 @@ public class CubeJoinedFlatTableDesc implements IJoinedFlatTableDesc, Serializab
 
     // check what columns from hive tables are required, and index them
     protected void initParseCubeDesc() {
-        for (TblColRef col : cubeDesc.listDimensionColumnsExcludingDerived(false)) {
-            initAddColumn(col);
+        if (this.includingDerived) {
+            for (TblColRef col : cubeDesc.listDimensionColumnsIncludingDerived()) {
+                initAddColumn(col);
+            }
+        } else {
+            for (TblColRef col : cubeDesc.listDimensionColumnsExcludingDerived(false)) {
+                initAddColumn(col);
+            }
         }
 
         List<MeasureDesc> measures = cubeDesc.getMeasures();
@@ -115,15 +135,22 @@ public class CubeJoinedFlatTableDesc implements IJoinedFlatTableDesc, Serializab
         }
     }
 
-    // sanity check the input record (in bytes) matches what's expected
-    public void sanityCheck(BytesSplitter bytesSplitter) {
-        if (columnCount != bytesSplitter.getBufferSize()) {
-            throw new IllegalArgumentException("Expect " + columnCount + " columns, but see " + bytesSplitter.getBufferSize() + " -- " + bytesSplitter);
+    @Override
+    public List<TblColRef> getFactColumns() {
+        final List<TblColRef> factColumns = Lists.newArrayList();
+        for (TblColRef col : this.getAllColumns()) {
+            if (col.getTableRef().equals(getDataModel().getRootFactTable())) {
+                // only fetch the columns from fact table
+                factColumns.add(col);
+            }
         }
-
-        // TODO: check data types here
+        return factColumns;
     }
 
+    public int getColumnCount() {
+        return columnCount;
+    }
+    
     @Override
     public String getTableName() {
         return tableName;
@@ -150,6 +177,9 @@ public class CubeJoinedFlatTableDesc implements IJoinedFlatTableDesc, Serializab
 
     @Override
     public SegmentRange getSegRange() {
+        if (cubeSegment.isOffsetCube()) {
+            return null;
+        }
         return cubeSegment.getSegRange();
     }
 
@@ -161,6 +191,11 @@ public class CubeJoinedFlatTableDesc implements IJoinedFlatTableDesc, Serializab
     @Override
     public ISegment getSegment() {
         return cubeSegment;
+    }
+
+    @Override
+    public boolean useAlias() {
+        return true;
     }
 
     @Override

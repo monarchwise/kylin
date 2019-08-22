@@ -18,6 +18,9 @@
 
 package org.apache.kylin.cube;
 
+import java.util.Map;
+import java.util.Set;
+
 import org.apache.kylin.metadata.realization.RealizationStatusEnum;
 
 /**
@@ -31,9 +34,14 @@ public class CubeUpdate {
     private RealizationStatusEnum status;
     private String owner;
     private int cost = -1;
+    private Map<Long, Long> cuboids = null;
+    private Set<Long> cuboidsRecommend = null;
+    private Map<String, String> updateTableSnapshotPath = null;
+    private long createTimeUTC = -1;
+    private long cuboidLastOptimized = -1;
 
     public CubeUpdate(CubeInstance cubeInstance) {
-        this.cubeInstance = cubeInstance;
+        setCubeInstance(cubeInstance);
     }
 
     public CubeInstance getCubeInstance() {
@@ -41,6 +49,9 @@ public class CubeUpdate {
     }
 
     public CubeUpdate setCubeInstance(CubeInstance cubeInstance) {
+        if (cubeInstance.isCachedAndShared())
+            throw new IllegalArgumentException();
+
         this.cubeInstance = cubeInstance;
         return this;
     }
@@ -97,5 +108,47 @@ public class CubeUpdate {
     public CubeUpdate setCost(int cost) {
         this.cost = cost;
         return this;
+    }
+
+    public Map<Long, Long> getCuboids() {
+        return cuboids;
+    }
+
+    public CubeUpdate setCuboids(Map<Long, Long> cuboids) {
+        this.cuboids = cuboids;
+        return this;
+    }
+
+    public Set<Long> getCuboidsRecommend() {
+        return cuboidsRecommend;
+    }
+
+    public CubeUpdate setCuboidsRecommend(Set<Long> cuboidsRecommend) {
+        this.cuboidsRecommend = cuboidsRecommend;
+        return this;
+    }
+
+    public Map<String, String> getUpdateTableSnapshotPath() {
+        return updateTableSnapshotPath;
+    }
+
+    public void setUpdateTableSnapshotPath(Map<String, String> updateTableSnapshotPath) {
+        this.updateTableSnapshotPath = updateTableSnapshotPath;
+    }
+
+    public long getCreateTimeUTC() {
+        return createTimeUTC;
+    }
+
+    public void setCreateTimeUTC(long createTimeUTC) {
+        this.createTimeUTC = createTimeUTC;
+    }
+
+    public long getCuboidLastOptimized() {
+        return cuboidLastOptimized;
+    }
+
+    public void setCuboidLastOptimized(long cuboidLastOptimized) {
+        this.cuboidLastOptimized = cuboidLastOptimized;
     }
 }

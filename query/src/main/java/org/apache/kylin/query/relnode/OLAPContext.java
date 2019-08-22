@@ -27,25 +27,37 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.calcite.DataContext;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.kylin.common.KylinConfig;
+import org.apache.kylin.common.threadlocal.InternalThreadLocal;
+import org.apache.kylin.common.util.DateFormat;
 import org.apache.kylin.cube.CubeInstance;
+import org.apache.kylin.metadata.expression.ExpressionColCollector;
+import org.apache.kylin.metadata.expression.TupleExpression;
+import org.apache.kylin.metadata.filter.CompareTupleFilter;
 import org.apache.kylin.metadata.filter.TupleFilter;
+import org.apache.kylin.metadata.model.DataModelDesc;
+import org.apache.kylin.metadata.model.DynamicFunctionDesc;
 import org.apache.kylin.metadata.model.FunctionDesc;
 import org.apache.kylin.metadata.model.JoinDesc;
 import org.apache.kylin.metadata.model.JoinsTree;
 import org.apache.kylin.metadata.model.MeasureDesc;
+import org.apache.kylin.metadata.model.TableRef;
 import org.apache.kylin.metadata.model.TblColRef;
+import org.apache.kylin.metadata.project.ProjectManager;
 import org.apache.kylin.metadata.realization.IRealization;
 import org.apache.kylin.metadata.realization.SQLDigest;
 import org.apache.kylin.metadata.realization.SQLDigest.SQLCall;
 import org.apache.kylin.metadata.tuple.TupleInfo;
+import org.apache.kylin.query.routing.RealizationCheck;
 import org.apache.kylin.query.schema.OLAPSchema;
 import org.apache.kylin.storage.StorageContext;
 import org.apache.kylin.storage.hybrid.HybridInstance;
 
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 
 /**
  */
@@ -54,9 +66,9 @@ public class OLAPContext {
     public static final String PRM_ACCEPT_PARTIAL_RESULT = "AcceptPartialResult";
     public static final String PRM_USER_AUTHEN_INFO = "UserAuthenInfo";
 
-    private static final ThreadLocal<Map<String, String>> _localPrarameters = new ThreadLocal<Map<String, String>>();
+    static final InternalThreadLocal<Map<String, String>> _localPrarameters = new InternalThreadLocal<Map<String, String>>();
 
-    private static final ThreadLocal<Map<Integer, OLAPContext>> _localContexts = new ThreadLocal<Map<Integer, OLAPContext>>();
+    static final InternalThreadLocal<Map<Integer, OLAPContext>> _localContexts = new InternalThreadLocal<Map<Integer, OLAPContext>>();
 
     public static void setParameters(Map<String, String> parameters) {
         _localPrarameters.set(parameters);
@@ -90,7 +102,7 @@ public class OLAPContext {
 
     public OLAPContext(int seq) {
         this.id = seq;
-        this.storageContext = new StorageContext();
+        this.storageContext = new StorageContext(seq);
         this.sortColumns = Lists.newArrayList();
         this.sortOrders = Lists.newArrayList();
         Map<String, String> parameters = _localPrarameters.get();
@@ -121,9 +133,16 @@ public class OLAPContext {
     public boolean limitPrecedesAggr = false;
     public boolean afterJoin = false;
     public boolean hasJoin = false;
+    public boolean hasLimit = false;
+    public boolean hasWindow = false;
+    public boolean groupByExpression = false; // checkout if group by column has operator
+    public boolean afterOuterAggregate = false;
+    public boolean disableLimitPushdown = !KylinConfig.getInstanceFromEnv().isLimitPushDownEnabled();
 
     // cube metadata
     public IRealization realization;
+    public RealizationCheck realizationCheck;
+    public boolean fixedModel;
 
     public Set<TblColRef> allColumns = new HashSet<>();
     public List<TblColRef> groupByColumns = new ArrayList<>();
@@ -137,11 +156,16 @@ public class OLAPContext {
     public TupleFilter havingFilter;
     public List<JoinDesc> joins = new LinkedList<>();
     public JoinsTree joinsTree;
-    private List<TblColRef> sortColumns;
-    private List<SQLDigest.OrderEnum> sortOrders;
+    List<TblColRef> sortColumns;
+    List<SQLDigest.OrderEnum> sortOrders;
 
     // rewrite info
     public Map<String, RelDataType> rewriteFields = new HashMap<>();
+
+    // dynamic columns info, note that the name of TblColRef will be the field name
+    public Map<TblColRef, RelDataType> dynamicFields = new HashMap<>();
+
+    public Map<TblColRef, TupleExpression> dynGroupBy = new HashMap<>();
 
     // hive query
     public String sql = "";
@@ -152,18 +176,37 @@ public class OLAPContext {
         return (joins.size() == 0) && (groupByColumns.size() == 0) && (aggregations.size() == 0);
     }
 
-    private SQLDigest sqlDigest;
+    SQLDigest sqlDigest;
 
     public SQLDigest getSQLDigest() {
-        if (sqlDigest == null)
+        if (sqlDigest == null) {
+            Set<TblColRef> rtDimColumns = new HashSet<>();
+            for (TupleExpression tupleExpr : dynGroupBy.values()) {
+                rtDimColumns.addAll(ExpressionColCollector.collectColumns(tupleExpr));
+            }
+            Set<TblColRef> rtMetricColumns = new HashSet<>();
+            List<DynamicFunctionDesc> dynFuncs = Lists.newLinkedList();
+            for (FunctionDesc functionDesc : aggregations) {
+                if (functionDesc instanceof DynamicFunctionDesc) {
+                    DynamicFunctionDesc dynFunc = (DynamicFunctionDesc) functionDesc;
+                    rtMetricColumns.addAll(dynFunc.getMeasureColumnSet());
+                    rtDimColumns.addAll(dynFunc.getFilterColumnSet());
+                    dynFuncs.add(dynFunc);
+                }
+            }
             sqlDigest = new SQLDigest(firstTableScan.getTableName(), allColumns, joins, // model
-                    groupByColumns, subqueryJoinParticipants, // group by
-                    metricsColumns, aggregations, aggrSqlCalls, // aggregation
+                    groupByColumns, subqueryJoinParticipants, dynGroupBy, groupByExpression, // group by
+                    metricsColumns, aggregations, aggrSqlCalls, dynFuncs, // aggregation
+                    rtDimColumns, rtMetricColumns, // runtime related columns
                     filterColumns, filter, havingFilter, // filter
-                    sortColumns, sortOrders, limitPrecedesAggr, // sort & limit
-                    involvedMeasure
-            );
+                    sortColumns, sortOrders, limitPrecedesAggr, hasLimit, // sort & limit
+                    involvedMeasure);
+        }
         return sqlDigest;
+    }
+
+    public boolean isDynamicColumnEnabled() {
+        return olapSchema != null && olapSchema.getProjectInstance().getConfig().isDynamicColumnEnabled();
     }
 
     public boolean hasPrecalculatedFields() {
@@ -180,7 +223,39 @@ public class OLAPContext {
                 return true;
             }
         }
-        
+
+        return false;
+    }
+
+    public boolean belongToFactTableDims(TblColRef tblColRef) {
+        if (!belongToContextTables(tblColRef)) {
+            return false;
+        }
+        KylinConfig kylinConfig = olapSchema.getConfig();
+        String projectName = olapSchema.getProjectName();
+        String factTableName = firstTableScan.getOlapTable().getTableName();
+        Set<IRealization> realizations = ProjectManager.getInstance(kylinConfig).getRealizationsByTable(projectName,
+                factTableName);
+        for (IRealization real : realizations) {
+            DataModelDesc model = real.getModel();
+            TblColRef.fixUnknownModel(model, tblColRef.getTableRef().getTableIdentity(), tblColRef);
+
+            // cannot be a measure column
+            Set<String> metrics = Sets.newHashSet(model.getMetrics());
+            if (metrics.contains(tblColRef.getIdentity())) {
+                tblColRef.unfixTableRef();
+                return false;
+            }
+
+            // must belong to a fact table
+            for (TableRef factTable : model.getFactTables()) {
+                if (factTable.getColumns().contains(tblColRef)) {
+                    tblColRef.unfixTableRef();
+                    return true;
+                }
+            }
+            tblColRef.unfixTableRef();
+        }
         return false;
     }
 
@@ -202,6 +277,55 @@ public class OLAPContext {
         }
     }
 
+    public void fixModel(DataModelDesc model, Map<String, String> aliasMap) {
+        if (fixedModel)
+            return;
+
+        for (OLAPTableScan tableScan : this.allTableScans) {
+            tableScan.fixColumnRowTypeWithModel(model, aliasMap);
+        }
+        fixedModel = true;
+    }
+
+    public void unfixModel() {
+        if (!fixedModel)
+            return;
+
+        for (OLAPTableScan tableScan : this.allTableScans) {
+            tableScan.unfixColumnRowTypeWithModel();
+        }
+        fixedModel = false;
+    }
+
+    public void bindVariable(DataContext dataContext) {
+        bindVariable(this.filter, dataContext);
+    }
+
+    private void bindVariable(TupleFilter filter, DataContext dataContext) {
+        if (filter == null) {
+            return;
+        }
+
+        for (TupleFilter childFilter : filter.getChildren()) {
+            bindVariable(childFilter, dataContext);
+        }
+
+        if (filter instanceof CompareTupleFilter && dataContext != null) {
+            CompareTupleFilter compFilter = (CompareTupleFilter) filter;
+            for (Map.Entry<String, Object> entry : compFilter.getVariables().entrySet()) {
+                String variable = entry.getKey();
+                Object value = dataContext.get(variable);
+                if (value != null) {
+                    String str = value.toString();
+                    if (compFilter.getColumn().getType().isDateTimeFamily())
+                        str = String.valueOf(DateFormat.stringToMillis(str));
+                    compFilter.clearPreviousVariableValues(variable);
+                    compFilter.bindVariable(variable, str);
+                }
+
+            }
+        }
+    }
     // ============================================================================
 
     public interface IAccessController {

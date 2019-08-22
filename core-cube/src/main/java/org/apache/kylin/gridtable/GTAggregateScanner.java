@@ -18,6 +18,8 @@
 
 package org.apache.kylin.gridtable;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -25,6 +27,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -33,6 +37,7 @@ import java.util.List;
 import java.util.Map.Entry;
 import java.util.PriorityQueue;
 import java.util.SortedMap;
+import java.util.TreeMap;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.kylin.common.exceptions.ResourceLimitExceededException;
@@ -55,13 +60,15 @@ import org.apache.kylin.metadata.tuple.ITuple;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
 @SuppressWarnings({ "rawtypes", "unchecked" })
-public class GTAggregateScanner implements IGTScanner {
+public class GTAggregateScanner implements IGTScanner, IGTBypassChecker {
 
     private static final Logger logger = LoggerFactory.getLogger(GTAggregateScanner.class);
+    private static final int MAX_BUFFER_SIZE = 64 * 1024 * 1024;
 
     final GTInfo info;
     final ImmutableBitSet dimensions; // dimensions to return, can be more than group by
@@ -71,12 +78,13 @@ public class GTAggregateScanner implements IGTScanner {
     final IGTScanner inputScanner;
     final BufferedMeasureCodec measureCodec;
     final AggregationCache aggrCache;
-    final long spillThreshold; // 0 means no memory control && no spill
+    long spillThreshold; // 0 means no memory control && no spill
     final int storagePushDownLimit;//default to be Int.MAX
+    final StorageLimitLevel storageLimitLevel;
     final boolean spillEnabled;
     final TupleFilter havingFilter;
 
-    private int aggregatedRowCount = 0;
+    private long inputRowCount = 0L;
     private MemoryWaterLevel memTracker;
     private boolean[] aggrMask;
 
@@ -84,23 +92,33 @@ public class GTAggregateScanner implements IGTScanner {
         this(inputScanner, req, true);
     }
 
-    public GTAggregateScanner(IGTScanner inputScanner, GTScanRequest req, boolean spillEnabled) {
+    public GTAggregateScanner(IGTScanner input, GTScanRequest req, boolean spillEnabled) {
         if (!req.hasAggregation())
             throw new IllegalStateException();
 
-        this.info = inputScanner.getInfo();
+        if (input instanceof GTFilterScanner) {
+            logger.info("setting IGTBypassChecker of child");
+            ((GTFilterScanner) input).setChecker(this);
+        } else {
+            logger.info("applying a GTFilterScanner with IGTBypassChecker on top child");
+            input = new GTFilterScanner(input, null, this);
+        }
+
+        this.inputScanner = input;
+        this.info = this.inputScanner.getInfo();
         this.dimensions = req.getDimensions();
         this.groupBy = req.getAggrGroupBy();
         this.metrics = req.getAggrMetrics();
         this.metricsAggrFuncs = req.getAggrMetricsFuncs();
-        this.inputScanner = inputScanner;
         this.measureCodec = req.createMeasureCodec();
-        this.aggrCache = new AggregationCache();
         this.spillThreshold = (long) (req.getAggCacheMemThreshold() * MemoryBudgetController.ONE_GB);
         this.aggrMask = new boolean[metricsAggrFuncs.length];
         this.storagePushDownLimit = req.getStoragePushDownLimit();
+        this.storageLimitLevel = req.getStorageLimitLevel();
         this.spillEnabled = spillEnabled;
         this.havingFilter = req.getHavingFilterPushDown();
+
+        this.aggrCache = new AggregationCache();
 
         Arrays.fill(aggrMask, true);
     }
@@ -138,6 +156,10 @@ public class GTAggregateScanner implements IGTScanner {
         return info;
     }
 
+    public long getInputRowCount() {
+        return inputRowCount;
+    }
+
     @Override
     public void close() throws IOException {
         inputScanner.close();
@@ -147,18 +169,15 @@ public class GTAggregateScanner implements IGTScanner {
     @Override
     public Iterator<GTRecord> iterator() {
         long count = 0;
+
         for (GTRecord r : inputScanner) {
 
-            if (getNumOfSpills() == 0) {
-                //check limit
-                boolean ret = aggrCache.aggregate(r, storagePushDownLimit);
+            //check limit
+            boolean ret = aggrCache.aggregate(r);
 
-                if (!ret) {
-                    logger.info("abort reading inputScanner because storage push down limit is hit");
-                    break;//limit is hit
-                }
-            } else {//else if dumps is not empty, it means a lot of row need aggregated, so it's less likely that limit clause is helping 
-                aggrCache.aggregate(r, Integer.MAX_VALUE);
+            if (!ret) {
+                logger.info("abort reading inputScanner because storage push down limit is hit");
+                break;//limit is hit
             }
 
             count++;
@@ -180,11 +199,95 @@ public class GTAggregateScanner implements IGTScanner {
         return aggrCache.estimatedMemSize();
     }
 
+    public boolean shouldBypass(GTRecord record) {
+        return aggrCache.shouldBypass(record);
+    }
+
     class AggregationCache implements Closeable {
+        /**
+         * if a limit construct is provided
+         * before a gtrecord is sent to filter->aggregate pipeline, 
+         * this check could help to decide if the record should be skipped
+         *
+         * e.g. 
+         * limit is three, and current AggregationCache's key set contains (1,2,3),
+         * when gtrecord with key 4 comes, it should be skipped before sending to filter 
+         */
+        class ByPassChecker {
+            private int aggregateBufferSizeLimit = -1;
+            private byte[] currentLastKey = null;
+            private int[] groupOffsetsInLastKey = null;
+
+            private int byPassCounter = 0;
+
+            ByPassChecker(int aggregateBufferSizeLimit) {
+                this.aggregateBufferSizeLimit = aggregateBufferSizeLimit;
+
+                //init groupOffsetsInLastKey
+                int p = 0;
+                int idx = 0;
+                this.groupOffsetsInLastKey = new int[groupBy.trueBitCount()];
+                for (int i = 0; i < dimensions.trueBitCount(); i++) {
+                    int c = dimensions.trueBitAt(i);
+                    int l = info.codeSystem.maxCodeLength(c);
+                    if (groupBy.get(c))
+                        groupOffsetsInLastKey[idx++] = p;
+                    p += l;
+                }
+            }
+
+            /**
+             * @return true if should bypass this record
+             */
+            boolean shouldByPass(GTRecord record) {
+
+                if (dumps.size() > 0) {
+                    return false; //rare case: limit tends to be small, when limit is applied it's not likely to have dumps
+                    //TODO: what if bypass before dump happens?
+                }
+
+                Preconditions.checkState(aggBufMap.size() <= aggregateBufferSizeLimit);
+
+                if (aggBufMap.size() == aggregateBufferSizeLimit) {
+                    Preconditions.checkNotNull(currentLastKey);
+                    for (int i = 0; i < groupBy.trueBitCount(); i++) {
+                        int c = groupBy.trueBitAt(i);
+                        ByteArray col = record.get(c);
+
+                        int compare = Bytes.compareTo(col.array(), col.offset(), col.length(), currentLastKey,
+                                groupOffsetsInLastKey[i], col.length());
+                        if (compare > 0) {
+                            byPassCounter++;
+                            return true;
+                        } else if (compare < 0) {
+                            return false;
+                        }
+                    }
+                }
+
+                return false;
+            }
+
+            void updateOnBufferChange() {
+                if (aggBufMap.size() > aggregateBufferSizeLimit) {
+                    aggBufMap.pollLastEntry();
+                    Preconditions.checkState(aggBufMap.size() == aggregateBufferSizeLimit);
+                }
+
+                currentLastKey = aggBufMap.lastKey();
+            }
+
+            int getByPassCounter() {
+                return byPassCounter;
+            }
+        }
+
         final List<Dump> dumps;
         final int keyLength;
         final boolean[] compareMask;
         boolean compareAll = true;
+        long sumSpilledSize = 0;
+        ByPassChecker byPassChecker = null;
 
         final Comparator<byte[]> bytesComparator = new Comparator<byte[]>() {
             @Override
@@ -212,7 +315,7 @@ public class GTAggregateScanner implements IGTScanner {
             }
         };
 
-        SortedMap<byte[], MeasureAggregator[]> aggBufMap;
+        TreeMap<byte[], MeasureAggregator[]> aggBufMap;
 
         public AggregationCache() {
             compareMask = createCompareMask();
@@ -222,6 +325,20 @@ public class GTAggregateScanner implements IGTScanner {
             keyLength = compareMask.length;
             dumps = Lists.newArrayList();
             aggBufMap = createBuffMap();
+
+            if (storageLimitLevel == StorageLimitLevel.LIMIT_ON_RETURN_SIZE) {
+                //ByPassChecker is not free, if LIMIT_ON_SCAN, not worth to as it has better optimization
+                byPassChecker = new ByPassChecker(storagePushDownLimit);
+            }
+        }
+
+        public boolean shouldBypass(GTRecord record) {
+            if (byPassChecker == null) {
+                return false;
+            }
+
+            boolean b = byPassChecker.shouldByPass(record);
+            return b;
         }
 
         private boolean[] createCompareMask() {
@@ -237,7 +354,7 @@ public class GTAggregateScanner implements IGTScanner {
             for (int i = 0; i < dimensions.trueBitCount(); i++) {
                 int c = dimensions.trueBitAt(i);
                 int l = info.codeSystem.maxCodeLength(c);
-                boolean m = groupBy.get(c) ? true : false;
+                boolean m = groupBy.get(c);
                 for (int j = 0; j < l; j++) {
                     mask[p++] = m;
                 }
@@ -245,7 +362,7 @@ public class GTAggregateScanner implements IGTScanner {
             return mask;
         }
 
-        private SortedMap<byte[], MeasureAggregator[]> createBuffMap() {
+        private TreeMap<byte[], MeasureAggregator[]> createBuffMap() {
             return Maps.newTreeMap(bytesComparator);
         }
 
@@ -263,8 +380,8 @@ public class GTAggregateScanner implements IGTScanner {
             return result;
         }
 
-        boolean aggregate(GTRecord r, int stopForLimit) {
-            if (++aggregatedRowCount % 100000 == 0) {
+        boolean aggregate(GTRecord r) {
+            if (++inputRowCount % 100000 == 0) {
                 if (memTracker != null) {
                     memTracker.markHigh();
                 }
@@ -272,7 +389,8 @@ public class GTAggregateScanner implements IGTScanner {
                 final long estMemSize = estimatedMemSize();
                 if (spillThreshold > 0 && estMemSize > spillThreshold) {
                     if (!spillEnabled) {
-                        throw new ResourceLimitExceededException("aggregation's memory consumption " + estMemSize + " exceeds threshold " + spillThreshold);
+                        throw new ResourceLimitExceededException("aggregation's memory consumption " + estMemSize
+                                + " exceeds threshold " + spillThreshold);
                     }
                     spillBuffMap(estMemSize); // spill to disk
                     aggBufMap = createBuffMap();
@@ -284,7 +402,9 @@ public class GTAggregateScanner implements IGTScanner {
             if (aggrs == null) {
 
                 //for storage push down limit
-                if (aggBufMap.size() >= stopForLimit) {
+                //TODO: what if bypass before dump happens?
+                if (getNumOfSpills() == 0 && storageLimitLevel == StorageLimitLevel.LIMIT_ON_SCAN
+                        && aggBufMap.size() >= storagePushDownLimit) {
                     return false;
                 }
 
@@ -298,6 +418,11 @@ public class GTAggregateScanner implements IGTScanner {
                     aggrs[i].aggregate(metrics);
                 }
             }
+
+            if (byPassChecker != null) {
+                byPassChecker.updateOnBufferChange();
+            }
+
             return true;
         }
 
@@ -306,6 +431,18 @@ public class GTAggregateScanner implements IGTScanner {
                 Dump dump = new Dump(aggBufMap, estMemSize);
                 dump.flush();
                 dumps.add(dump);
+                sumSpilledSize += dump.size();
+                // when spilled data is too much, we can modify it by other strategy.
+                // this means, all spilled data is bigger than half of original spillThreshold.
+                if(sumSpilledSize > spillThreshold) {
+                    for(Dump current : dumps) {
+                        current.spill();
+                    }
+                    spillThreshold += sumSpilledSize;
+                    sumSpilledSize = 0;
+                } else {
+                    spillThreshold -= dump.size();
+                }
             } catch (Exception e) {
                 throw new RuntimeException("AggregationCache failed to spill", e);
             }
@@ -314,6 +451,12 @@ public class GTAggregateScanner implements IGTScanner {
         @Override
         public void close() throws RuntimeException {
             try {
+                logger.info("closing aggrCache");
+                if (byPassChecker != null) {
+                    logger.info("AggregationCache byPassChecker helps to skip {} cuboid rows",
+                            byPassChecker.getByPassCounter());
+                }
+
                 for (Dump dump : dumps) {
                     dump.terminate();
                 }
@@ -356,7 +499,8 @@ public class GTAggregateScanner implements IGTScanner {
 
                 final ReturningRecord returningRecord = new ReturningRecord();
                 Entry<byte[], MeasureAggregator[]> returningEntry = null;
-                final HavingFilterChecker havingFilterChecker = (havingFilter == null) ? null : new HavingFilterChecker();
+                final HavingFilterChecker havingFilterChecker = (havingFilter == null) ? null
+                        : new HavingFilterChecker();
 
                 @Override
                 public boolean hasNext() {
@@ -494,7 +638,7 @@ public class GTAggregateScanner implements IGTScanner {
                 for (int i = 0; i < dimensions.trueBitCount(); i++) {
                     int c = dimensions.trueBitAt(i);
                     final int columnLength = info.codeSystem.maxCodeLength(c);
-                    record.cols[c].set(key, offset, columnLength);
+                    record.cols[c].reset(key, offset, columnLength);
                     offset += columnLength;
                 }
 
@@ -507,7 +651,7 @@ public class GTAggregateScanner implements IGTScanner {
                 offset = 0;
                 for (int i = 0; i < value.length; i++) {
                     int col = metrics.trueBitAt(i);
-                    record.cols[col].set(bytes, offset, sizes[i]);
+                    record.cols[col].reset(bytes, offset, sizes[i]);
                     offset += sizes[i];
                 }
             }
@@ -517,7 +661,7 @@ public class GTAggregateScanner implements IGTScanner {
             final File dumpedFile;
             SortedMap<byte[], MeasureAggregator[]> buffMap;
             final long estMemSize;
-
+            byte[] spillBuffer;
             DataInputStream dis;
 
             public Dump(SortedMap<byte[], MeasureAggregator[]> buffMap, long estMemSize) throws IOException {
@@ -530,10 +674,15 @@ public class GTAggregateScanner implements IGTScanner {
             public Iterator<Pair<byte[], byte[]>> iterator() {
                 try {
                     if (dumpedFile == null || !dumpedFile.exists()) {
-                        throw new RuntimeException("Dumped file cannot be found at: " + (dumpedFile == null ? "<null>" : dumpedFile.getAbsolutePath()));
+                        throw new RuntimeException("Dumped file cannot be found at: "
+                                + (dumpedFile == null ? "<null>" : dumpedFile.getAbsolutePath()));
                     }
 
-                    dis = new DataInputStream(new FileInputStream(dumpedFile));
+                    if(spillBuffer == null) {
+                        dis = new DataInputStream(new FileInputStream(dumpedFile));
+                    } else {
+                        dis = new DataInputStream(new ByteArrayInputStream(spillBuffer));
+                    }
                     final int count = dis.readInt();
                     return new Iterator<Pair<byte[], byte[]>>() {
                         int cursorIdx = 0;
@@ -555,7 +704,8 @@ public class GTAggregateScanner implements IGTScanner {
                                 dis.read(value);
                                 return new Pair<>(key, value);
                             } catch (Exception e) {
-                                throw new RuntimeException("Cannot read AggregationCache from dumped file: " + e.getMessage());
+                                throw new RuntimeException(
+                                        "Cannot read AggregationCache from dumped file: " + e.getMessage());
                             }
                         }
 
@@ -569,38 +719,61 @@ public class GTAggregateScanner implements IGTScanner {
                 }
             }
 
-            public void flush() throws IOException {
-                logger.info("AggregationCache(size={} est_mem_size={} threshold={}) will spill to {}", buffMap.size(), estMemSize, spillThreshold, dumpedFile.getAbsolutePath());
+            public void spill() throws IOException {
+                if(spillBuffer == null) return;
+                OutputStream ops = new FileOutputStream(dumpedFile);
+                InputStream ips = new ByteArrayInputStream(spillBuffer);
+                IOUtils.copy(ips, ops);
+                spillBuffer = null;
+                IOUtils.closeQuietly(ips);
+                IOUtils.closeQuietly(ops);
 
+                logger.info("Spill buffer to disk, location: {}, size = {}.", dumpedFile.getAbsolutePath(),
+                    dumpedFile.length());
+            }
+
+            public int size() {
+                return spillBuffer == null ? 0 : spillBuffer.length;
+            }
+
+            public void flush() throws IOException {
+                logger.info("AggregationCache(size={} est_mem_size={} threshold={}) will spill to {}", buffMap.size(),
+                        estMemSize, spillThreshold, dumpedFile.getAbsolutePath());
+                ByteArrayOutputStream baos = new ByteArrayOutputStream(MAX_BUFFER_SIZE);
                 if (buffMap != null) {
-                    DataOutputStream dos = null;
+                    DataOutputStream bos = new DataOutputStream(baos);
                     Object[] aggrResult = null;
                     try {
-                        dos = new DataOutputStream(new FileOutputStream(dumpedFile));
-                        dos.writeInt(buffMap.size());
+                        bos.writeInt(buffMap.size());
+
                         for (Entry<byte[], MeasureAggregator[]> entry : buffMap.entrySet()) {
                             MeasureAggregators aggs = new MeasureAggregators(entry.getValue());
                             aggrResult = new Object[metrics.trueBitCount()];
                             aggs.collectStates(aggrResult);
                             ByteBuffer metricsBuf = measureCodec.encode(aggrResult);
-                            dos.writeInt(entry.getKey().length);
-                            dos.write(entry.getKey());
-                            dos.writeInt(metricsBuf.position());
-                            dos.write(metricsBuf.array(), 0, metricsBuf.position());
+
+                            bos.writeInt(entry.getKey().length);
+                            bos.write(entry.getKey());
+                            bos.writeInt(metricsBuf.position());
+                            bos.write(metricsBuf.array(), 0, metricsBuf.position());
                         }
                     } finally {
                         buffMap = null;
-                        IOUtils.closeQuietly(dos);
+                        IOUtils.closeQuietly(bos);
                     }
                 }
+                spillBuffer = baos.toByteArray();
+                IOUtils.closeQuietly(baos);
+                logger.info("Accurately spill data size = {}", spillBuffer.length);
             }
 
             public void terminate() throws IOException {
                 buffMap = null;
                 if (dis != null)
-                    dis.close();
+                    IOUtils.closeQuietly(dis);
                 if (dumpedFile != null && dumpedFile.exists())
                     dumpedFile.delete();
+                spillBuffer = null;
             }
         }
 
@@ -637,9 +810,9 @@ public class GTAggregateScanner implements IGTScanner {
             private void enqueueFromDump(int index) {
                 if (dumpIterators.get(index) != null && dumpIterators.get(index).hasNext()) {
                     Pair<byte[], byte[]> pair = dumpIterators.get(index).next();
-                    minHeap.offer(new SimpleEntry(pair.getKey(), index));
+                    minHeap.offer(new SimpleEntry(pair.getFirst(), index));
                     Object[] metricValues = new Object[metrics.trueBitCount()];
-                    measureCodec.decode(ByteBuffer.wrap(pair.getValue()), metricValues);
+                    measureCodec.decode(ByteBuffer.wrap(pair.getSecond()), metricValues);
                     dumpCurrentValues.set(index, metricValues);
                 }
             }

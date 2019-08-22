@@ -27,7 +27,7 @@ import org.apache.calcite.schema.impl.AbstractSchema;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.StorageURL;
 import org.apache.kylin.cube.CubeManager;
-import org.apache.kylin.metadata.MetadataManager;
+import org.apache.kylin.metadata.model.DataModelManager;
 import org.apache.kylin.metadata.model.TableDesc;
 import org.apache.kylin.metadata.project.ProjectInstance;
 import org.apache.kylin.metadata.project.ProjectManager;
@@ -56,7 +56,7 @@ public class OLAPSchema extends AbstractSchema {
     }
 
     public OLAPSchema(String project, String schemaName, boolean exposeMore) {
-        this.projectName = ProjectInstance.getNormalizedProjectName(project);
+        this.projectName = project;
         this.schemaName = schemaName;
         this.exposeMore = exposeMore;
         init();
@@ -75,9 +75,8 @@ public class OLAPSchema extends AbstractSchema {
     private Map<String, Table> buildTableMap() {
         Map<String, Table> olapTables = new HashMap<String, Table>();
 
-        Collection<TableDesc> projectTables = exposeMore
-                ? ProjectManager.getInstance(config).listDefinedTables(projectName)
-                : ProjectManager.getInstance(config).listExposedTables(projectName);
+        Collection<TableDesc> projectTables = ProjectManager.getInstance(config).listExposedTables(projectName,
+                exposeMore);
 
         for (TableDesc tableDesc : projectTables) {
             if (tableDesc.getDatabase().equals(schemaName)) {
@@ -115,8 +114,8 @@ public class OLAPSchema extends AbstractSchema {
         return starSchemaPassword;
     }
 
-    public MetadataManager getMetadataManager() {
-        return MetadataManager.getInstance(config);
+    public DataModelManager getMetadataManager() {
+        return DataModelManager.getInstance(config);
     }
 
     public KylinConfig getConfig() {
@@ -131,4 +130,7 @@ public class OLAPSchema extends AbstractSchema {
         return CubeManager.getInstance(config);
     }
 
+    public ProjectInstance getProjectInstance() {
+        return ProjectManager.getInstance(config).getProject(projectName);
+    }
 }

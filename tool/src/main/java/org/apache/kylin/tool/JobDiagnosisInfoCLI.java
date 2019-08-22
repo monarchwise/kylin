@@ -32,6 +32,7 @@ import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.persistence.ResourceStore;
 import org.apache.kylin.common.persistence.ResourceTool;
 import org.apache.kylin.common.util.OptionsHelper;
+import org.apache.kylin.common.util.StringUtil;
 import org.apache.kylin.job.constant.ExecutableConstants;
 import org.apache.kylin.job.dao.ExecutableDao;
 import org.apache.kylin.job.dao.ExecutablePO;
@@ -46,19 +47,30 @@ public class JobDiagnosisInfoCLI extends AbstractInfoExtractor {
     private static final Logger logger = LoggerFactory.getLogger(JobDiagnosisInfoCLI.class);
 
     @SuppressWarnings("static-access")
-    private static final Option OPTION_JOB_ID = OptionBuilder.withArgName("jobId").hasArg().isRequired(true).withDescription("specify the Job ID to extract information. ").create("jobId");
+    private static final Option OPTION_JOB_ID = OptionBuilder.withArgName("jobId").hasArg().isRequired(true)
+            .withDescription("specify the Job ID to extract information. ").create("jobId");
 
     @SuppressWarnings("static-access")
-    private static final Option OPTION_INCLUDE_CUBE = OptionBuilder.withArgName("includeCube").hasArg().isRequired(false).withDescription("set this to true if want to extract related cube info too. Default true").create("includeCube");
+    private static final Option OPTION_INCLUDE_CUBE = OptionBuilder.withArgName("includeCube").hasArg()
+            .isRequired(false)
+            .withDescription("set this to true if want to extract related cube info too. Default true")
+            .create("includeCube");
 
     @SuppressWarnings("static-access")
-    private static final Option OPTION_INCLUDE_YARN_LOGS = OptionBuilder.withArgName("includeYarnLogs").hasArg().isRequired(false).withDescription("set this to true if want to extract related yarn logs too. Default true").create("includeYarnLogs");
+    private static final Option OPTION_INCLUDE_YARN_LOGS = OptionBuilder.withArgName("includeYarnLogs").hasArg()
+            .isRequired(false)
+            .withDescription("set this to true if want to extract related yarn logs too. Default true")
+            .create("includeYarnLogs");
 
     @SuppressWarnings("static-access")
-    private static final Option OPTION_INCLUDE_CLIENT = OptionBuilder.withArgName("includeClient").hasArg().isRequired(false).withDescription("Specify whether to include client info to extract. Default true.").create("includeClient");
+    private static final Option OPTION_INCLUDE_CLIENT = OptionBuilder.withArgName("includeClient").hasArg()
+            .isRequired(false).withDescription("Specify whether to include client info to extract. Default true.")
+            .create("includeClient");
 
     @SuppressWarnings("static-access")
-    private static final Option OPTION_INCLUDE_CONF = OptionBuilder.withArgName("includeConf").hasArg().isRequired(false).withDescription("Specify whether to include conf files to extract. Default true.").create("includeConf");
+    private static final Option OPTION_INCLUDE_CONF = OptionBuilder.withArgName("includeConf").hasArg()
+            .isRequired(false).withDescription("Specify whether to include conf files to extract. Default true.")
+            .create("includeConf");
 
     List<String> requiredResources = Lists.newArrayList();
     List<String> yarnLogsResources = Lists.newArrayList();
@@ -88,10 +100,18 @@ public class JobDiagnosisInfoCLI extends AbstractInfoExtractor {
     @Override
     protected void executeExtract(OptionsHelper optionsHelper, File exportDir) throws Exception {
         String kylinJobId = optionsHelper.getOptionValue(OPTION_JOB_ID);
-        boolean includeCube = optionsHelper.hasOption(OPTION_INCLUDE_CUBE) ? Boolean.valueOf(optionsHelper.getOptionValue(OPTION_INCLUDE_CUBE)) : true;
-        boolean includeYarnLogs = optionsHelper.hasOption(OPTION_INCLUDE_YARN_LOGS) ? Boolean.valueOf(optionsHelper.getOptionValue(OPTION_INCLUDE_YARN_LOGS)) : true;
-        boolean includeClient = optionsHelper.hasOption(OPTION_INCLUDE_CLIENT) ? Boolean.valueOf(optionsHelper.getOptionValue(OPTION_INCLUDE_CLIENT)) : true;
-        boolean includeConf = optionsHelper.hasOption(OPTION_INCLUDE_CONF) ? Boolean.valueOf(optionsHelper.getOptionValue(OPTION_INCLUDE_CONF)) : true;
+        boolean includeCube = optionsHelper.hasOption(OPTION_INCLUDE_CUBE)
+                ? Boolean.parseBoolean(optionsHelper.getOptionValue(OPTION_INCLUDE_CUBE))
+                : true;
+        boolean includeYarnLogs = optionsHelper.hasOption(OPTION_INCLUDE_YARN_LOGS)
+                ? Boolean.parseBoolean(optionsHelper.getOptionValue(OPTION_INCLUDE_YARN_LOGS))
+                : true;
+        boolean includeClient = optionsHelper.hasOption(OPTION_INCLUDE_CLIENT)
+                ? Boolean.parseBoolean(optionsHelper.getOptionValue(OPTION_INCLUDE_CLIENT))
+                : true;
+        boolean includeConf = optionsHelper.hasOption(OPTION_INCLUDE_CONF)
+                ? Boolean.parseBoolean(optionsHelper.getOptionValue(OPTION_INCLUDE_CONF))
+                : true;
 
         // dump job output
         logger.info("Start to dump job output");
@@ -113,7 +133,9 @@ public class JobDiagnosisInfoCLI extends AbstractInfoExtractor {
             if (!StringUtils.isEmpty(cubeName)) {
                 File metaDir = new File(exportDir, "cube");
                 FileUtils.forceMkdir(metaDir);
-                String[] cubeMetaArgs = { "-cube", cubeName, "-destDir", new File(metaDir, cubeName).getAbsolutePath(), "-includeJobs", "false", "-compress", "false", "-submodule", "true" };
+                String[] cubeMetaArgs = { "-packagetype", "cubemeta", "-cube", cubeName, "-destDir",
+                        new File(metaDir, cubeName).getAbsolutePath(), "-includeJobs", "false", "-compress", "false",
+                        "-submodule", "true" };
                 logger.info("Start to extract related cube: " + StringUtils.join(cubeMetaArgs));
                 CubeMetaExtractor cubeMetaExtractor = new CubeMetaExtractor();
                 logger.info("CubeMetaExtractor args: " + Arrays.toString(cubeMetaArgs));
@@ -133,7 +155,8 @@ public class JobDiagnosisInfoCLI extends AbstractInfoExtractor {
         }
 
         if (includeClient) {
-            String[] clientArgs = { "-destDir", new File(exportDir, "client").getAbsolutePath(), "-compress", "false", "-submodule", "true" };
+            String[] clientArgs = { "-destDir", new File(exportDir, "client").getAbsolutePath(), "-compress", "false",
+                    "-submodule", "true" };
             ClientEnvExtractor clientEnvExtractor = new ClientEnvExtractor();
             logger.info("ClientEnvExtractor args: " + Arrays.toString(clientArgs));
             clientEnvExtractor.execute(clientArgs);
@@ -150,7 +173,8 @@ public class JobDiagnosisInfoCLI extends AbstractInfoExtractor {
         }
 
         // export kylin logs
-        String[] logsArgs = { "-destDir", new File(exportDir, "logs").getAbsolutePath(), "-compress", "false", "-submodule", "true" };
+        String[] logsArgs = { "-destDir", new File(exportDir, "logs").getAbsolutePath(), "-compress", "false",
+                "-submodule", "true" };
         KylinLogExtractor logExtractor = new KylinLogExtractor();
         logger.info("KylinLogExtractor args: " + Arrays.toString(logsArgs));
         logExtractor.execute(logsArgs);
@@ -165,7 +189,7 @@ public class JobDiagnosisInfoCLI extends AbstractInfoExtractor {
         try {
             KylinConfig srcConfig = KylinConfig.getInstanceFromEnv();
             KylinConfig dstConfig = KylinConfig.createInstanceFromUri(destDir.getAbsolutePath());
-            ResourceTool.copy(srcConfig, dstConfig, requiredResources);
+            new ResourceTool().copy(srcConfig, dstConfig, requiredResources);
         } catch (Exception e) {
             throw new RuntimeException("Failed to extract job resources. ", e);
         }
@@ -194,7 +218,8 @@ public class JobDiagnosisInfoCLI extends AbstractInfoExtractor {
         if (jobInfo.containsKey(ExecutableConstants.MR_JOB_ID)) {
             String mrJobId = jobInfo.get(ExecutableConstants.MR_JOB_ID);
             FileUtils.forceMkdir(destDir);
-            String[] mrJobArgs = { "-mrJobId", mrJobId, "-destDir", destDir.getAbsolutePath(), "-compress", "false", "-submodule", "true" };
+            String[] mrJobArgs = { "-mrJobId", mrJobId, "-destDir", destDir.getAbsolutePath(), "-compress", "false",
+                    "-submodule", "true" };
             new MrJobInfoExtractor().execute(mrJobArgs);
         }
     }
@@ -203,9 +228,9 @@ public class JobDiagnosisInfoCLI extends AbstractInfoExtractor {
         final String yarnCmd = "yarn application -status " + applicationId;
         final String cmdOutput = kylinConfig.getCliCommandExecutor().execute(yarnCmd).getSecond();
         final Map<String, String> params = Maps.newHashMap();
-        final String[] cmdOutputLines = cmdOutput.split("\n");
+        final String[] cmdOutputLines = StringUtil.split(cmdOutput, "\n");
         for (String cmdOutputLine : cmdOutputLines) {
-            String[] pair = cmdOutputLine.split(":");
+            String[] pair = StringUtil.split(cmdOutputLine, ":");
             if (pair.length >= 2) {
                 params.put(pair[0].trim(), pair[1].trim());
             }
@@ -218,11 +243,7 @@ public class JobDiagnosisInfoCLI extends AbstractInfoExtractor {
             return true;
         }
 
-        if (params.containsKey("Final-State") && params.get("Final-State").equals("SUCCEEDED")) {
-            return true;
-        }
-
-        return false;
+        return params.containsKey("Final-State") && params.get("Final-State").equals("SUCCEEDED");
     }
 
     private void addRequired(String record) {

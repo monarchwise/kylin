@@ -25,7 +25,6 @@ import java.io.File;
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.Mapper.Context;
 import org.apache.kylin.common.util.Bytes;
@@ -73,17 +72,14 @@ public class CubeHFileMapper2Test extends LocalFileMetadataTestCase {
         Context context = MockupMapContext.create(hconf, cubeName, outKV);
 
         CubeHFileMapper mapper = new CubeHFileMapper();
-        mapper.setup(context);
+        mapper.doSetup(context);
 
         Text key = new Text("not important");
         Text value = new Text(new byte[] { 2, 2, 51, -79, 1 });
 
         mapper.map(key, value, context);
 
-        ImmutableBytesWritable outKey = (ImmutableBytesWritable) outKV[0];
         KeyValue outValue = (KeyValue) outKV[1];
-
-        assertTrue(Bytes.compareTo(key.getBytes(), 0, key.getLength(), outKey.get(), outKey.getOffset(), outKey.getLength()) == 0);
 
         assertTrue(Bytes.compareTo(value.getBytes(), 0, value.getLength(), outValue.getValueArray(), outValue.getValueOffset(), outValue.getValueLength()) == 0);
     }

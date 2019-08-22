@@ -20,9 +20,7 @@ package org.apache.kylin.engine.mr.steps;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.Text;
@@ -50,23 +48,20 @@ abstract public class FactDistinctColumnsMapperBase<KEYIN, VALUEIN> extends Kyli
     protected CubeSegment cubeSeg;
     protected CubeDesc cubeDesc;
     protected long baseCuboidId;
-    protected List<TblColRef> factDictCols;
     protected IMRTableInputFormat flatTableInputFormat;
+    protected List<TblColRef> allCols;
 
     protected Text outputKey = new Text();
-    //protected SelfDefineSortableKey sortableKey = new SelfDefineSortableKey();
     protected Text outputValue = new Text();
     protected int errorRecordCounter = 0;
 
     protected CubeJoinedFlatTableEnrich intermediateTableDesc;
-    protected int[] dictionaryColumnIndex;
+    protected int[] columnIndex;
 
-    protected int uhcReducerCount;
-    protected int[] uhcIndex;
-    protected Map<Integer, Integer> columnIndexToReducerBeginId = new HashMap<>();
-
+    protected FactDistinctColumnsReducerMapping reducerMapping;
+    
     @Override
-    protected void setup(Context context) throws IOException {
+    protected void doSetup(Context context) throws IOException {
         Configuration conf = context.getConfiguration();
         bindCurrentConfiguration(conf);
         KylinConfig config = AbstractHadoopJob.loadKylinPropsAndMetadata();
@@ -76,26 +71,17 @@ abstract public class FactDistinctColumnsMapperBase<KEYIN, VALUEIN> extends Kyli
         cubeSeg = cube.getSegmentById(conf.get(BatchConstants.CFG_CUBE_SEGMENT_ID));
         cubeDesc = cube.getDescriptor();
         baseCuboidId = Cuboid.getBaseCuboidId(cubeDesc);
-        factDictCols = CubeManager.getInstance(config).getAllDictColumnsOnFact(cubeDesc);
+        reducerMapping = new FactDistinctColumnsReducerMapping(cube);
+        allCols = reducerMapping.getAllDimDictCols();
 
         flatTableInputFormat = MRUtil.getBatchCubingInputSide(cubeSeg).getFlatTableInputFormat();
 
         intermediateTableDesc = new CubeJoinedFlatTableEnrich(EngineFactory.getJoinedFlatTableDesc(cubeSeg), cubeDesc);
-        dictionaryColumnIndex = new int[factDictCols.size()];
-        for (int i = 0; i < factDictCols.size(); i++) {
-            TblColRef colRef = factDictCols.get(i);
+        columnIndex = new int[allCols.size()];
+        for (int i = 0; i < allCols.size(); i++) {
+            TblColRef colRef = allCols.get(i);
             int columnIndexOnFlatTbl = intermediateTableDesc.getColumnIndex(colRef);
-            dictionaryColumnIndex[i] = columnIndexOnFlatTbl;
-        }
-
-        uhcIndex = CubeManager.getInstance(config).getUHCIndex(cubeDesc);
-        uhcReducerCount = cube.getConfig().getUHCReducerCount();
-        int count = 0;
-        for (int i = 0; i < uhcIndex.length; i++) {
-            columnIndexToReducerBeginId.put(i, count * (uhcReducerCount - 1) + i);
-            if (uhcIndex[i] == 1) {
-                count++;
-            }
+            columnIndex[i] = columnIndexOnFlatTbl;
         }
     }
 

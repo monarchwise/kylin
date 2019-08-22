@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.kylin.common.KylinConfig;
-import org.apache.kylin.metadata.MetadataManager;
+import org.apache.kylin.metadata.TableMetadataManager;
 import org.apache.kylin.metadata.model.ColumnDesc;
 
 public class ColumnGenConfig {
@@ -103,7 +103,7 @@ public class ColumnGenConfig {
         
         KylinConfig kylinConfig = modelGen.getModle().getConfig();
         String project = modelGen.getModle().getProject();
-        ColumnDesc pkcol = MetadataManager.getInstance(kylinConfig)//
+        ColumnDesc pkcol = TableMetadataManager.getInstance(kylinConfig)//
                 .getTableDesc(pkTableName, project).findColumnByName(pkColName);
         return modelGen.getPkValues(pkcol);
     }
@@ -121,8 +121,19 @@ public class ColumnGenConfig {
         return 0;
     }
 
-    private boolean guessGenNull(String col) {
+    private static boolean guessGenNull(String col) {
         return col.contains("_NULL");
     }
 
+    public static boolean isNullable(ColumnDesc col) {
+        Map<String, String> config = Util.parseEqualCommaPairs(col.getDataGen(), "values");
+        List<String> values = Arrays.asList(Util.parseString(config, "values", "").split("[|]"));
+        return Util.parseBoolean(config, "null", guessGenNull(col.getName()));
+    }
+
+    public static String getNullStr(ColumnDesc col) {
+        Map<String, String> config = Util.parseEqualCommaPairs(col.getDataGen(), "values");
+        List<String> values = Arrays.asList(Util.parseString(config, "values", "").split("[|]"));
+        return Util.parseString(config, "nullstr", "\\N"); // '\N' is null in hive
+    }
 }

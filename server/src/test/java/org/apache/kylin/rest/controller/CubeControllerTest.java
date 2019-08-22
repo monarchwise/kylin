@@ -25,9 +25,14 @@ import java.util.List;
 import org.apache.kylin.cube.CubeInstance;
 import org.apache.kylin.cube.CubeSegment;
 import org.apache.kylin.cube.model.CubeDesc;
+import org.apache.kylin.cube.model.DimensionDesc;
 import org.apache.kylin.metadata.model.SegmentRange.TSRange;
+import org.apache.kylin.metadata.realization.RealizationStatusEnum;
 import org.apache.kylin.rest.exception.InternalErrorException;
+import org.apache.kylin.rest.exception.NotFoundException;
 import org.apache.kylin.rest.request.CubeRequest;
+import org.apache.kylin.rest.response.CubeInstanceResponse;
+import org.apache.kylin.rest.response.GeneralResponse;
 import org.apache.kylin.rest.service.CubeService;
 import org.apache.kylin.rest.service.JobService;
 import org.apache.kylin.rest.service.ServiceTestBase;
@@ -118,13 +123,13 @@ public class CubeControllerTest extends ServiceTestBase {
         List<String> notifyList = Lists.newArrayList();
         notifyList.add("john@example.com");
         cubeController.updateNotifyList(newCubeName, notifyList);
-        cubeController.updateCubeCost(newCubeName, 80);
 
-        List<CubeInstance> cubeInstances = cubeController.getCubes(newCubeName, cube.getModelName(), "default", 1, 0);
+        List<CubeInstanceResponse> cubeInstances = cubeController.getCubes(newCubeName, cube.getModelName(), "default",
+                1, 0);
 
-        CubeInstance cubeInstance = cubeInstances.get(0);
+        CubeInstance cubeInstance = cubeController.getCube(cubeInstances.get(0).getName());
         Assert.assertTrue(cubeInstance.getDescriptor().getNotifyList().contains("john@example.com"));
-        Assert.assertTrue(cubeInstance.getCost() == 80);
+        Assert.assertTrue(cubeInstance.getCost() == 495);
         cubeController.deleteCube(newCubeName);
     }
 
@@ -134,25 +139,35 @@ public class CubeControllerTest extends ServiceTestBase {
         CubeDesc[] cubes = cubeDescController.getCube(cubeName);
         Assert.assertNotNull(cubes);
 
-        cubeController.deleteSegment(cubeName, "20131212000000_20140112000000");
+        String segmentName = "20131212000000_20140112000000";
+
+        CubeInstance cube = cubeService.getCubeManager().getCube(cubeName);
+        CubeSegment toDelete = null;
+        for (CubeSegment seg : cube.getSegments()) {
+            if (seg.getName().equals(segmentName)) {
+                toDelete = seg;
+                break;
+            }
+        }
+
+        Assert.assertNotNull(toDelete);
+        String segId = toDelete.getUuid();
+
+        cubeController.deleteSegment(cubeName, segmentName);
+
+        // delete success, no related job 'NEW' segment can be delete
+        if (cubeService.isOrphonSegment(cube, segId)){
+            throw new InternalErrorException();
+        }
     }
 
-    @Test(expected = InternalErrorException.class)
+    @Test(expected = NotFoundException.class)
     public void testDeleteSegmentNotExist() throws IOException {
         String cubeName = "test_kylin_cube_with_slr_ready_3_segments";
         CubeDesc[] cubes = cubeDescController.getCube(cubeName);
         Assert.assertNotNull(cubes);
 
         cubeController.deleteSegment(cubeName, "not_exist_segment");
-    }
-
-    @Test(expected = InternalErrorException.class)
-    public void testDeleteSegmentInMiddle() throws IOException {
-        String cubeName = "test_kylin_cube_with_slr_ready_3_segments";
-        CubeDesc[] cubes = cubeDescController.getCube(cubeName);
-        Assert.assertNotNull(cubes);
-
-        cubeController.deleteSegment(cubeName, "20131112000000_20131212000000");
     }
 
     @Test
@@ -170,7 +185,6 @@ public class CubeControllerTest extends ServiceTestBase {
         Assert.assertTrue(segNumber == newSegNumber + 1);
     }
 
-
     @Test
     public void testGetHoles() throws IOException {
         String cubeName = "test_kylin_cube_with_slr_ready_3_segments";
@@ -180,7 +194,7 @@ public class CubeControllerTest extends ServiceTestBase {
         CubeInstance cube = cubeService.getCubeManager().getCube(cubeName);
         List<CubeSegment> segments = cube.getSegments();
 
-        final long dateEnd = segments.get(segments.size() -1).getTSRange().end.v;
+        final long dateEnd = segments.get(segments.size() - 1).getTSRange().end.v;
 
         final long ONEDAY = 24 * 60 * 60000;
         cubeService.getCubeManager().appendSegment(cube, new TSRange(dateEnd + ONEDAY, dateEnd + ONEDAY * 2));
@@ -194,11 +208,36 @@ public class CubeControllerTest extends ServiceTestBase {
         Assert.assertTrue(hole.getTSRange().equals(new TSRange(dateEnd, dateEnd + ONEDAY)));
     }
 
-
     @Test
     public void testGetCubes() {
-        List<CubeInstance> cubes = cubeController.getCubes(null, null, null, 1, 0);
+        List<CubeInstanceResponse> cubes = cubeController.getCubes(null, null, null, 1, 0);
         Assert.assertTrue(cubes.size() == 1);
+    }
+
+    @Test
+    public void testGetSql() {
+        GeneralResponse response = cubeController.getSql("test_kylin_cube_with_slr_ready");
+        String sql = response.getProperty("sql");
+        CubeDesc cubeDesc = cubeDescController.getDesc("test_kylin_cube_with_slr_ready");
+
+        for (DimensionDesc dimensionDesc : cubeDesc.getDimensions()) {
+            if (dimensionDesc.getDerived() != null) {
+                for (String derivedDimension : dimensionDesc.getDerived()) {
+                    Assert.assertTrue(sql.contains(derivedDimension));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void tesDeleteDescBrokenCube() throws Exception {
+        final String cubeName = "ci_left_join_cube";
+        CubeInstance cubeInstance = cubeService.getCubeManager().getCube(cubeName);
+        CubeDesc cubeDesc = cubeInstance.getDescriptor();
+        cubeDesc.setModel(null);
+        cubeInstance.setStatus(RealizationStatusEnum.DESCBROKEN);
+        cubeController.deleteCube(cubeName);
+        Assert.assertNull(cubeService.getCubeManager().getCube(cubeName));
     }
 
 }

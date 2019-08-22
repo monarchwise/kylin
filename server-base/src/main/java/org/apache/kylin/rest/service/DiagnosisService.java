@@ -21,11 +21,16 @@ package org.apache.kylin.rest.service;
 import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.CliCommandExecutor;
 import org.apache.kylin.common.util.Pair;
+import org.apache.kylin.metadata.badquery.BadQueryEntry;
 import org.apache.kylin.metadata.badquery.BadQueryHistory;
 import org.apache.kylin.rest.exception.BadRequestException;
 import org.apache.kylin.rest.msg.Message;
@@ -36,16 +41,12 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import com.google.common.io.Files;
+import com.google.common.collect.Lists;
 
 @Component("diagnosisService")
 public class DiagnosisService extends BasicService {
 
     private static final Logger logger = LoggerFactory.getLogger(DiagnosisService.class);
-
-    protected File getDumpDir() {
-        return Files.createTempDir();
-    }
 
     @Autowired
     private AclEvaluate aclEvaluate;
@@ -58,7 +59,8 @@ public class DiagnosisService extends BasicService {
 
         File[] files = destDir.listFiles();
         if (files == null) {
-            throw new BadRequestException(String.format(msg.getDIAG_PACKAGE_NOT_AVAILABLE(), destDir.getAbsolutePath()));
+            throw new BadRequestException(
+                    String.format(Locale.ROOT, msg.getDIAG_PACKAGE_NOT_AVAILABLE(), destDir.getAbsolutePath()));
         }
         for (File subDir : files) {
             if (subDir.isDirectory()) {
@@ -69,7 +71,8 @@ public class DiagnosisService extends BasicService {
                 }
             }
         }
-        throw new BadRequestException(String.format(msg.getDIAG_PACKAGE_NOT_FOUND(), destDir.getAbsolutePath()));
+        throw new BadRequestException(
+                String.format(Locale.ROOT, msg.getDIAG_PACKAGE_NOT_FOUND(), destDir.getAbsolutePath()));
     }
 
     public BadQueryHistory getProjectBadQueryHistory(String project) throws IOException {
@@ -77,18 +80,16 @@ public class DiagnosisService extends BasicService {
         return getBadQueryHistoryManager().getBadQueriesForProject(project);
     }
 
-    public String dumpProjectDiagnosisInfo(String project) throws IOException {
+    public String dumpProjectDiagnosisInfo(String project, File exportPath) throws IOException {
         aclEvaluate.checkProjectOperationPermission(project);
-        File exportPath = getDumpDir();
         String[] args = { project, exportPath.getAbsolutePath() };
         runDiagnosisCLI(args);
         return getDiagnosisPackageName(exportPath);
     }
 
-    public String dumpJobDiagnosisInfo(String jobId) throws IOException {
+    public String dumpJobDiagnosisInfo(String jobId, File exportPath) throws IOException {
         aclEvaluate.checkProjectOperationPermission(jobService.getJobInstance(jobId));
-        File exportPath = getDumpDir();
-        String[] args = {jobId, exportPath.getAbsolutePath()};
+        String[] args = { jobId, exportPath.getAbsolutePath() };
         runDiagnosisCLI(args);
         return getDiagnosisPackageName(exportPath);
     }
@@ -102,16 +103,51 @@ public class DiagnosisService extends BasicService {
         logger.debug("DiagnosisInfoCLI args: " + Arrays.toString(args));
         File script = new File(KylinConfig.getKylinHome() + File.separator + "bin", "diag.sh");
         if (!script.exists()) {
-            throw new BadRequestException(String.format(msg.getDIAG_NOT_FOUND(), script.getAbsolutePath()));
+            throw new BadRequestException(
+                    String.format(Locale.ROOT, msg.getDIAG_NOT_FOUND(), script.getAbsolutePath()));
         }
 
         String diagCmd = script.getAbsolutePath() + " " + StringUtils.join(args, " ");
         CliCommandExecutor executor = KylinConfig.getInstanceFromEnv().getCliCommandExecutor();
         Pair<Integer, String> cmdOutput = executor.execute(diagCmd);
 
-        if (cmdOutput.getKey() != 0) {
+        if (cmdOutput.getFirst() != 0) {
             throw new BadRequestException(msg.getGENERATE_DIAG_PACKAGE_FAIL());
         }
+    }
+
+    public List<BadQueryEntry> getQueriesByType(List<BadQueryEntry> allBadEntries, String queryType)
+            throws IOException {
+
+        List<BadQueryEntry> filteredEntries = Lists.newArrayList();
+        for (BadQueryEntry entry : allBadEntries) {
+            if (null != entry && entry.getAdj().equals(queryType)) {
+                filteredEntries.add(entry);
+            }
+        }
+        return filteredEntries;
+    }
+
+    public Map<String, Object> getQueries(Integer pageOffset, Integer pageSize, String queryType,
+            List<BadQueryEntry> allBadEntries) throws IOException {
+        HashMap<String, Object> data = new HashMap<>();
+        List<BadQueryEntry> filteredEntries = getQueriesByType(allBadEntries, queryType);
+
+        int offset = pageOffset * pageSize;
+        int limit = pageSize;
+
+        if (filteredEntries.size() <= offset) {
+            offset = filteredEntries.size();
+            limit = 0;
+        }
+
+        if ((filteredEntries.size() - offset) < limit) {
+            limit = filteredEntries.size() - offset;
+        }
+
+        data.put("badQueries", filteredEntries.subList(offset, offset + limit));
+        data.put("size", filteredEntries.size());
+        return data;
     }
 
 }

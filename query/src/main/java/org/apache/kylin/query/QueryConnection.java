@@ -19,6 +19,7 @@
 package org.apache.kylin.query;
 
 import java.io.File;
+import java.lang.reflect.InvocationTargetException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
@@ -26,23 +27,32 @@ import java.util.Properties;
 
 import org.apache.calcite.jdbc.Driver;
 import org.apache.kylin.common.KylinConfig;
-import org.apache.kylin.metadata.project.ProjectInstance;
+import org.apache.kylin.common.debug.BackdoorToggles;
 import org.apache.kylin.query.schema.OLAPSchemaFactory;
-import org.apache.log4j.Logger;
 
 public class QueryConnection {
-    private static final Logger logger = Logger.getLogger(QueryConnection.class);
+    
     private static Boolean isRegister = false;
 
     public static Connection getConnection(String project) throws SQLException {
         if (!isRegister) {
-            DriverManager.registerDriver(new Driver());
+            try {
+                Class<?> aClass = Thread.currentThread().getContextClassLoader()
+                        .loadClass("org.apache.calcite.jdbc.Driver");
+                Driver o = (Driver) aClass.getDeclaredConstructor().newInstance();
+                DriverManager.registerDriver(o);
+            } catch (ClassNotFoundException | InstantiationException | IllegalAccessException | NoSuchMethodException | InvocationTargetException e) {
+                e.printStackTrace();
+            }
             isRegister = true;
         }
-        File olapTmp = OLAPSchemaFactory.createTempOLAPJson(ProjectInstance.getNormalizedProjectName(project),
-                KylinConfig.getInstanceFromEnv());
+        File olapTmp = OLAPSchemaFactory.createTempOLAPJson(project, KylinConfig.getInstanceFromEnv());
         Properties info = new Properties();
+        info.putAll(KylinConfig.getInstanceFromEnv().getCalciteExtrasProperties());
+        // Import calcite props from jdbc client(override the kylin.properties)
+        info.putAll(BackdoorToggles.getJdbcDriverClientCalciteProps());
         info.put("model", olapTmp.getAbsolutePath());
+        info.put("typeSystem", "org.apache.kylin.query.calcite.KylinRelDataTypeSystem");
         return DriverManager.getConnection("jdbc:calcite:", info);
     }
 }

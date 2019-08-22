@@ -19,11 +19,11 @@
 package org.apache.kylin.cube.inmemcubing;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 
 import org.apache.kylin.common.util.Dictionary;
+import org.apache.kylin.cube.cuboid.CuboidScheduler;
 import org.apache.kylin.cube.model.CubeDesc;
 import org.apache.kylin.gridtable.GTRecord;
 import org.apache.kylin.gridtable.GTScanRequest;
@@ -42,6 +42,7 @@ abstract public class AbstractInMemCubeBuilder {
 
     private static Logger logger = LoggerFactory.getLogger(AbstractInMemCubeBuilder.class);
 
+    final protected CuboidScheduler cuboidScheduler;
     final protected IJoinedFlatTableDesc flatDesc;
     final protected CubeDesc cubeDesc;
     final protected Map<TblColRef, Dictionary<String>> dictionaryMap;
@@ -49,16 +50,18 @@ abstract public class AbstractInMemCubeBuilder {
     protected int taskThreadCount = 1;
     protected int reserveMemoryMB = 100;
 
-    public AbstractInMemCubeBuilder(CubeDesc cubeDesc, IJoinedFlatTableDesc flatDesc, Map<TblColRef, Dictionary<String>> dictionaryMap) {
-        if (flatDesc == null)
+    protected AbstractInMemCubeBuilder(CuboidScheduler cuboidScheduler, IJoinedFlatTableDesc flatDesc,
+            Map<TblColRef, Dictionary<String>> dictionaryMap) {
+        if (cuboidScheduler == null)
             throw new NullPointerException();
-        if (cubeDesc == null)
+        if (flatDesc == null)
             throw new NullPointerException();
         if (dictionaryMap == null)
             throw new IllegalArgumentException("dictionary cannot be null");
 
+        this.cuboidScheduler = cuboidScheduler;
         this.flatDesc = flatDesc;
-        this.cubeDesc = cubeDesc;
+        this.cubeDesc = cuboidScheduler.getCubeDesc();
         this.dictionaryMap = dictionaryMap;
     }
 
@@ -74,12 +77,17 @@ abstract public class AbstractInMemCubeBuilder {
         return this.reserveMemoryMB;
     }
 
-    public Runnable buildAsRunnable(final BlockingQueue<List<String>> input, final ICuboidWriter output) {
+    public Runnable buildAsRunnable(final BlockingQueue<String[]> input, final ICuboidWriter output) {
+        return buildAsRunnable(input, new InputConverterUnitForRawData(cubeDesc, flatDesc, dictionaryMap), output);
+    }
+
+    public <T> Runnable buildAsRunnable(final BlockingQueue<T> input, final InputConverterUnit<T> inputConverterUnit,
+            final ICuboidWriter output) {
         return new Runnable() {
             @Override
             public void run() {
                 try {
-                    build(input, output);
+                    build(input, inputConverterUnit, output);
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
@@ -87,7 +95,8 @@ abstract public class AbstractInMemCubeBuilder {
         };
     }
 
-    abstract public void build(BlockingQueue<List<String>> input, ICuboidWriter output) throws IOException;
+    abstract public <T> void build(BlockingQueue<T> input, InputConverterUnit<T> inputConverterUnit,
+            ICuboidWriter output) throws IOException;
 
     protected void outputCuboid(long cuboidId, GridTable gridTable, ICuboidWriter output) throws IOException {
         long startTime = System.currentTimeMillis();

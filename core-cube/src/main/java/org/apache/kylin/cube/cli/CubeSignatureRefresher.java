@@ -18,15 +18,18 @@
 
 package org.apache.kylin.cube.cli;
 
+import java.io.IOException;
 import java.util.List;
 
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.persistence.ResourceStore;
+import org.apache.kylin.common.util.StringUtil;
 import org.apache.kylin.cube.CubeDescManager;
 import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.model.CubeDesc;
-import org.apache.kylin.metadata.MetadataManager;
+import org.apache.kylin.metadata.cachesync.Broadcaster;
+import org.apache.kylin.metadata.model.DataModelManager;
 import org.apache.kylin.metadata.project.ProjectManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -59,7 +62,7 @@ public class CubeSignatureRefresher {
         if (ArrayUtils.isEmpty(cubeNames)) {
             cubeDescs = cubeDescManager.listAllDesc();
         } else {
-            String[] names = cubeNames[0].split(",");
+            String[] names = StringUtil.splitByComma(cubeNames[0]);
             if (ArrayUtils.isEmpty(names))
                 return;
             cubeDescs = Lists.newArrayListWithCapacity(names.length);
@@ -75,8 +78,12 @@ public class CubeSignatureRefresher {
     }
 
     private void verify() {
-        MetadataManager.getInstance(config).reload();
-        CubeDescManager.clearCache();
+        try {
+            Broadcaster.getInstance(config).notifyClearAll();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        DataModelManager.getInstance(config);
         CubeDescManager.getInstance(config);
         CubeManager.getInstance(config);
         ProjectManager.getInstance(config);
@@ -91,7 +98,7 @@ public class CubeSignatureRefresher {
             String calculatedSign = cubeDesc.calculateSignature();
             if (cubeDesc.getSignature() == null || (!cubeDesc.getSignature().equals(calculatedSign))) {
                 cubeDesc.setSignature(calculatedSign);
-                store.putResource(cubeDesc.getResourcePath(), cubeDesc, CubeDescManager.CUBE_DESC_SERIALIZER);
+                store.checkAndPutResource(cubeDesc.getResourcePath(), cubeDesc, CubeDesc.newSerializerForLowLevelAccess());
                 updatedResources.add(cubeDesc.getResourcePath());
             }
         } catch (Exception e) {

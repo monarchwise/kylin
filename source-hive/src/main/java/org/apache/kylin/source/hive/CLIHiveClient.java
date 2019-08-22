@@ -19,20 +19,19 @@
 package org.apache.kylin.source.hive;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.hadoop.hive.cli.CliSessionState;
 import org.apache.hadoop.hive.common.StatsSetupConst;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
 import org.apache.hadoop.hive.metastore.MetaStoreUtils;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.Table;
-import org.apache.hadoop.hive.ql.CommandNeedRetryException;
-import org.apache.hadoop.hive.ql.Driver;
-import org.apache.hadoop.hive.ql.processors.CommandProcessorResponse;
-import org.apache.hadoop.hive.ql.session.SessionState;
+import org.apache.kylin.common.KylinConfig;
+import org.apache.kylin.common.util.HiveCmdBuilder;
+import org.apache.kylin.common.util.Pair;
 
 import com.google.common.collect.Lists;
 
@@ -43,7 +42,6 @@ import com.google.common.collect.Lists;
  */
 public class CLIHiveClient implements IHiveClient {
     protected HiveConf hiveConf = null;
-    protected Driver driver = null;
     protected HiveMetaStoreClient metaStoreClient = null;
 
     public CLIHiveClient() {
@@ -52,22 +50,25 @@ public class CLIHiveClient implements IHiveClient {
 
     /**
      * only used by Deploy Util
+     * @throws IOException 
      */
     @Override
-    public void executeHQL(String hql) throws CommandNeedRetryException, IOException {
-        CommandProcessorResponse response = getDriver().run(hql);
-        int retCode = response.getResponseCode();
-        if (retCode != 0) {
-            String err = response.getErrorMessage();
-            throw new IOException("Failed to execute hql [" + hql + "], error message is: " + err);
+    public void executeHQL(String hql) throws IOException {
+        final HiveCmdBuilder hiveCmdBuilder = new HiveCmdBuilder();
+        hiveCmdBuilder.addStatement(hql);
+        Pair<Integer, String> response = KylinConfig.getInstanceFromEnv().getCliCommandExecutor()
+                .execute(hiveCmdBuilder.toString());
+        if (response.getFirst() != 0) {
+            throw new IllegalArgumentException("Failed to execute hql [" + hql + "], error message is: " + response.getSecond());
         }
+
     }
 
     /**
      * only used by Deploy Util
      */
     @Override
-    public void executeHQL(String[] hqls) throws CommandNeedRetryException, IOException {
+    public void executeHQL(String[] hqls) throws IOException {
         for (String sql : hqls)
             executeHQL(sql);
     }
@@ -129,6 +130,36 @@ public class CLIHiveClient implements IHiveClient {
         return getBasicStatForTable(new org.apache.hadoop.hive.ql.metadata.Table(table), StatsSetupConst.ROW_COUNT);
     }
 
+    @Override
+    public List<Object[]> getHiveResult(String hql) throws Exception {
+        List<Object[]> data = new ArrayList<>();
+
+        final HiveCmdBuilder hiveCmdBuilder = new HiveCmdBuilder();
+        hiveCmdBuilder.addStatement(hql);
+        Pair<Integer, String> response = KylinConfig.getInstanceFromEnv().getCliCommandExecutor().execute(hiveCmdBuilder.toString());
+
+        String[] respData = response.getSecond().split("\n");
+
+        boolean isData = false;
+
+        for (String item : respData) {
+            if (item.trim().equalsIgnoreCase("OK")) {
+                isData = true;
+                continue;
+            }
+            if (item.trim().startsWith("Time taken")) {
+                isData = false;
+            }
+            if (isData) {
+                Object[] arr = item.split("\t");
+                data.add(arr);
+            }
+
+        }
+
+        return data;
+    }
+
     private HiveMetaStoreClient getMetaStoreClient() throws Exception {
         if (metaStoreClient == null) {
             metaStoreClient = new HiveMetaStoreClient(hiveConf);
@@ -158,18 +189,5 @@ public class CLIHiveClient implements IHiveClient {
             }
         }
         return result;
-    }
-
-    /**
-     * Get the hive ql driver to execute ddl or dml
-     * @return
-     */
-    private Driver getDriver() {
-        if (driver == null) {
-            driver = new Driver(hiveConf);
-            SessionState.start(new CliSessionState(hiveConf));
-        }
-
-        return driver;
     }
 }

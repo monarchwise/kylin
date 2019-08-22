@@ -21,9 +21,9 @@ package org.apache.kylin.dict.lookup;
 import java.io.IOException;
 
 import org.apache.kylin.common.KylinConfig;
-import org.apache.kylin.metadata.MetadataManager;
+import org.apache.kylin.metadata.TableMetadataManager;
 import org.apache.kylin.metadata.model.TableDesc;
-import org.apache.kylin.source.SourceFactory;
+import org.apache.kylin.source.SourceManager;
 
 public class SnapshotCLI {
 
@@ -35,14 +35,17 @@ public class SnapshotCLI {
 
     private static void rebuild(String table, String overwriteUUID, String project) throws IOException {
         KylinConfig conf = KylinConfig.getInstanceFromEnv();
-        MetadataManager metaMgr = MetadataManager.getInstance(conf);
+        TableMetadataManager metaMgr = TableMetadataManager.getInstance(conf);
         SnapshotManager snapshotMgr = SnapshotManager.getInstance(conf);
 
         TableDesc tableDesc = metaMgr.getTableDesc(table, project);
         if (tableDesc == null)
             throw new IllegalArgumentException("Not table found by " + table);
 
-        SnapshotTable snapshot = snapshotMgr.rebuildSnapshot(SourceFactory.createReadableTable(tableDesc), tableDesc, overwriteUUID);
+        if (tableDesc.isView())
+            throw new IllegalArgumentException("Build snapshot of hive view \'" + table + "\' not supported.");
+
+        SnapshotTable snapshot = snapshotMgr.rebuildSnapshot(SourceManager.createReadableTable(tableDesc, null), tableDesc, overwriteUUID);
         System.out.println("resource path updated: " + snapshot.getResourcePath());
     }
 }

@@ -20,6 +20,7 @@ package org.apache.kylin.cube.cuboid;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
@@ -31,8 +32,10 @@ import java.util.Set;
 import org.apache.kylin.common.util.LocalFileMetadataTestCase;
 import org.apache.kylin.cube.CubeDescManager;
 import org.apache.kylin.cube.model.CubeDesc;
-import org.apache.kylin.metadata.MetadataManager;
+import org.apache.kylin.cube.model.validation.ValidateContext;
+import org.apache.kylin.cube.model.validation.rule.AggregationGroupRule;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -47,7 +50,6 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
     @Before
     public void setUp() throws Exception {
         this.createTestMetadata();
-        MetadataManager.clearCache();
     }
 
     @After
@@ -95,6 +97,14 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
         return getCubeDescManager().getCubeDesc("fifty_dim");
     }
 
+    private CubeDesc getFiftyDimFiveCapCubeDesc() {
+        File metaFile = new File(LocalFileMetadataTestCase.LOCALMETA_TEMP_DATA, "cube_desc/fifty_dim_five_cap.json.bad");
+        assertTrue(metaFile.exists());
+        String path = metaFile.getPath();
+        metaFile.renameTo(new File(path.substring(0, path.length() - 4)));
+        return CubeDescManager.getInstance(getTestConfig()).getCubeDesc("fifty_dim_five_cap");
+    }
+
     private CubeDesc getTwentyDimCubeDesc() {
         return getCubeDescManager().getCubeDesc("twenty_dim");
     }
@@ -115,20 +125,21 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
             System.out.println("Spanning result for " + cuboidId + "(" + Long.toBinaryString(cuboidId) + "): " + toString(spannings));
 
             for (long child : spannings) {
-                assertTrue(Cuboid.isValid(cube, child));
+                assertTrue(scheduler.isValid(child));
             }
         }
 
         long[] spanningsArray = Longs.toArray(totalSpanning);
-        Arrays.sort(spanningsArray);
-        Arrays.sort(expectChildren);
+
+        Arrays.parallelSort(spanningsArray);
+        Arrays.parallelSort(expectChildren);
         assertArrayEquals(expectChildren, spanningsArray);
     }
 
     @Test
     public void testGetSpanningCuboid2() {
         CubeDesc cube = getTestKylinCubeWithSeller();
-        CuboidScheduler scheduler = cube.getCuboidScheduler();
+        CuboidScheduler scheduler = cube.getInitialCuboidScheduler();
 
         // generate 8d
         System.out.println("Spanning for 8D Cuboids");
@@ -156,7 +167,7 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
     @Test
     public void testGetSpanningCuboid1() {
         CubeDesc cube = getTestKylinCubeWithoutSeller();
-        CuboidScheduler scheduler = cube.getCuboidScheduler();
+        CuboidScheduler scheduler = cube.getInitialCuboidScheduler();
 
         // generate 7d
         System.out.println("Spanning for 7D Cuboids");
@@ -228,7 +239,7 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
     @Test
     public void testCuboidCounts1() {
         CubeDesc cube = getTestKylinCubeWithoutSeller();
-        CuboidScheduler cuboidScheduler = cube.getCuboidScheduler();
+        CuboidScheduler cuboidScheduler = cube.getInitialCuboidScheduler();
         int[] counts = CuboidCLI.calculateAllLevelCount(cube);
         printCount(counts);
         int sum = 0;
@@ -241,7 +252,7 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
     @Test
     public void testCuboidCounts2() {
         CubeDesc cube = getTestKylinCubeWithoutSellerLeftJoin();
-        CuboidScheduler cuboidScheduler = cube.getCuboidScheduler();
+        CuboidScheduler cuboidScheduler = cube.getInitialCuboidScheduler();
         int[] counts = CuboidCLI.calculateAllLevelCount(cube);
         printCount(counts);
         int sum = 0;
@@ -254,7 +265,7 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
     @Test
     public void testCuboidCounts3() {
         CubeDesc cube = getTestKylinCubeWithSeller();
-        CuboidScheduler cuboidScheduler = cube.getCuboidScheduler();
+        CuboidScheduler cuboidScheduler = cube.getInitialCuboidScheduler();
         int[] counts = CuboidCLI.calculateAllLevelCount(cube);
         printCount(counts);
         int sum = 0;
@@ -267,7 +278,7 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
     @Test
     public void testCuboidCounts4() {
         CubeDesc cube = getTestKylinCubeWithSellerLeft();
-        CuboidScheduler cuboidScheduler = cube.getCuboidScheduler();
+        CuboidScheduler cuboidScheduler = cube.getInitialCuboidScheduler();
         int[] counts = CuboidCLI.calculateAllLevelCount(cube);
         printCount(counts);
         int sum = 0;
@@ -280,7 +291,7 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
     @Test
     public void testCuboidCounts5() {
         CubeDesc cube = getStreamingCubeDesc();
-        CuboidScheduler cuboidScheduler = cube.getCuboidScheduler();
+        CuboidScheduler cuboidScheduler = cube.getInitialCuboidScheduler();
         int[] counts = CuboidCLI.calculateAllLevelCount(cube);
         printCount(counts);
         int sum = 0;
@@ -293,7 +304,7 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
     @Test
     public void testCuboidCounts6() {
         CubeDesc cube = getCIInnerJoinCube();
-        CuboidScheduler cuboidScheduler = cube.getCuboidScheduler();
+        CuboidScheduler cuboidScheduler = cube.getInitialCuboidScheduler();
         int[] counts = CuboidCLI.calculateAllLevelCount(cube);
         printCount(counts);
         int sum = 0;
@@ -306,10 +317,26 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
     @Test
     public void testLargeCube() {
         CubeDesc cube = getFiftyDimCubeDesc();
-        CuboidScheduler cuboidScheduler = cube.getCuboidScheduler();
+        CuboidScheduler cuboidScheduler = cube.getInitialCuboidScheduler();
         long start = System.currentTimeMillis();
         System.out.println(cuboidScheduler.getCuboidCount());
         System.out.println("build tree takes: " + (System.currentTimeMillis() - start) + "ms");
+    }
+
+    @Test
+    public void testTooLargeCube() {
+        CubeDesc cubeDesc = getFiftyDimFiveCapCubeDesc();
+        AggregationGroupRule rule = new AggregationGroupRule();
+        ValidateContext context = new ValidateContext();
+        rule.validate(cubeDesc, context);
+        assertFalse(context.ifPass());
+        assertEquals(1, context.getResults().length);
+
+        try {
+            cubeDesc.getInitialCuboidScheduler();
+            Assert.fail();
+        } catch (RuntimeException e) {
+        }
     }
 
     @Test(expected=RuntimeException.class)
@@ -317,7 +344,7 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
         File twentyFile = new File(new File(LocalFileMetadataTestCase.LOCALMETA_TEMP_DATA, "cube_desc"), "twenty_dim");
         twentyFile.renameTo(new File(twentyFile.getPath().substring(0, twentyFile.getPath().length() - 4)));
         CubeDesc cube = getTwentyDimCubeDesc();
-        CuboidScheduler cuboidScheduler = cube.getCuboidScheduler();
+        CuboidScheduler cuboidScheduler = cube.getInitialCuboidScheduler();
         cuboidScheduler.getCuboidCount();
         twentyFile.renameTo(new File(twentyFile.getPath() + ".bad"));
     }
@@ -330,12 +357,12 @@ public class CuboidSchedulerTest extends LocalFileMetadataTestCase {
                 f.renameTo(new File(path.substring(0, path.length() - 4)));
             }
         }
-        CubeDescManager.clearCache();
+        getTestConfig().clearManagers();
         CubeDesc cube = getCubeDescManager().getCubeDesc("ut_large_dimension_number");
-        CuboidScheduler scheduler = cube.getCuboidScheduler();
+        CuboidScheduler scheduler = cube.getInitialCuboidScheduler();
 
         Cuboid baseCuboid = Cuboid.getBaseCuboid(cube);
-        assertTrue(Cuboid.isValid(cube, baseCuboid.getId()));
+        assertTrue(scheduler.isValid(baseCuboid.getId()));
 
         List<Long> spanningChild = scheduler.getSpanningCuboid(baseCuboid.getId());
         assertTrue(spanningChild.size() > 0);

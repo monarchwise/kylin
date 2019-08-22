@@ -96,7 +96,7 @@ public class ITJDBCDriverTest extends HBaseMetadataTestCase {
 
     protected Connection getConnection() throws Exception {
 
-        Driver driver = (Driver) Class.forName("org.apache.kylin.jdbc.Driver").newInstance();
+        Driver driver = (Driver) Class.forName("org.apache.kylin.jdbc.Driver").getDeclaredConstructor().newInstance();
         Properties info = new Properties();
         info.put("user", "ADMIN");
         info.put("password", "KYLIN");
@@ -230,7 +230,11 @@ public class ITJDBCDriverTest extends HBaseMetadataTestCase {
 
         ResultSet rs = statement.executeQuery();
 
-        Assert.assertFalse(rs.next());
+        Assert.assertTrue(rs.next());
+
+        String format_name = rs.getString(1);
+
+        Assert.assertTrue("FP-GTC".equals(format_name));
 
         rs.close();
         statement.close();
@@ -293,6 +297,33 @@ public class ITJDBCDriverTest extends HBaseMetadataTestCase {
         Assert.assertTrue(count == 2);
         statement.close();
         rs.close();
+        conn.close();
+
+    }
+
+    @Test
+    public void testPreparedStatementWithCache() throws Exception {
+        Connection conn = getConnection();
+
+        PreparedStatement statement = conn
+                .prepareStatement("select count(1) as TRANS_CNT from test_kylin_fact where LSTG_FORMAT_NAME like ?");
+
+        statement.setString(1, "%");
+        ResultSet rs = statement.executeQuery();
+        Assert.assertTrue(rs.next());
+        Object object = rs.getObject(1);
+        long countFirst = (long) object;
+
+        statement.setString(1, "O%");
+        rs = statement.executeQuery();
+        Assert.assertTrue(rs.next());
+        object = rs.getObject(1);
+        long countSecond = (long) object;
+
+        Assert.assertTrue(countFirst > countSecond);
+
+        rs.close();
+        statement.close();
         conn.close();
 
     }

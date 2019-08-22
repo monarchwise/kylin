@@ -24,7 +24,7 @@ import java.util.Collection;
 
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.BytesUtil;
-import org.apache.kylin.metadata.MetadataManager;
+import org.apache.kylin.metadata.TableMetadataManager;
 import org.apache.kylin.metadata.filter.ColumnTupleFilter;
 import org.apache.kylin.metadata.filter.ConstantTupleFilter;
 import org.apache.kylin.metadata.filter.FunctionTupleFilter;
@@ -124,7 +124,7 @@ public class MassInTupleFilter extends FunctionTupleFilter {
 
             if (filterTableName == null) {
                 filterTableName = (String) child.getValues().iterator().next();
-                ExternalFilterDesc externalFilterDesc = MetadataManager.getInstance(KylinConfig.getInstanceFromEnv()).getExtFilterDesc(filterTableName);
+                ExternalFilterDesc externalFilterDesc = TableMetadataManager.getInstance(KylinConfig.getInstanceFromEnv()).getExtFilterDesc(filterTableName);
                 if (externalFilterDesc == null) {
                     throw new IllegalArgumentException("External filter named " + filterTableName + " is not found");
                 }
@@ -150,7 +150,7 @@ public class MassInTupleFilter extends FunctionTupleFilter {
         filterTableName = BytesUtil.readUTFString(buffer);
         filterTableResourceIdentifier = BytesUtil.readUTFString(buffer);
         filterTableType = Functions.FilterTableType.valueOf(BytesUtil.readUTFString(buffer));
-        reverse = Boolean.valueOf(BytesUtil.readUTFString(buffer));
+        reverse = Boolean.parseBoolean(BytesUtil.readUTFString(buffer));
     }
 
     public static boolean containsMassInTupleFilter(TupleFilter filter) {

@@ -40,9 +40,15 @@ KylinApp.constant('jobConfig', {
     {attr: 'last_modified', name: 'Last Modified Time'},
     {attr: 'duration', name: 'Duration'}
   ],
+  searchMode: [
+    {name: 'CUBING', value: 'CUBING_ONLY'},
+    {name: 'CHECK POINT', value: 'CHECKPOINT_ONLY'},
+    {name: 'ALL', value: 'ALL'}
+  ],
   queryitems: [
   {attr: 'server', name: 'Server'},
   {attr: 'user', name: 'User'},
+  {attr: 'cube', name: 'Hit Cube'},
   {attr: 'sql', name: 'Sql'},
   {attr: 'adj', name: 'Description'},
   {attr: 'running_seconds', name: 'Running Seconds'},

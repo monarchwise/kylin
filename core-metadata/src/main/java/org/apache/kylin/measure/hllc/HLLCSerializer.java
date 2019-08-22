@@ -18,11 +18,11 @@
 
 package org.apache.kylin.measure.hllc;
 
-import org.apache.kylin.metadata.datatype.DataType;
-import org.apache.kylin.metadata.datatype.DataTypeSerializer;
-
 import java.io.IOException;
 import java.nio.ByteBuffer;
+
+import org.apache.kylin.metadata.datatype.DataType;
+import org.apache.kylin.metadata.datatype.DataTypeSerializer;
 
 /**
  * @author yangli9
@@ -56,7 +56,7 @@ public class HLLCSerializer extends DataTypeSerializer<HLLCounter> {
 
     @Override
     public HLLCounter deserialize(ByteBuffer in) {
-        HLLCounter hllc = current();
+        HLLCounter hllc = new HLLCounter(precision);
         try {
             hllc.readRegisters(in);
         } catch (IOException e) {
@@ -80,4 +80,16 @@ public class HLLCSerializer extends DataTypeSerializer<HLLCounter> {
         return current().maxLength();
     }
 
+    @Override
+    protected double getStorageBytesEstimate(double averageNumOfElementsInCounter) {
+        int registerIndexSize = current().getRegisterIndexSize();
+        int m = 1 << precision;
+        if (!current().isDense((int) averageNumOfElementsInCounter)
+                || averageNumOfElementsInCounter < (m - 5d) / (1d + registerIndexSize)) {
+            // 5 = 1 + 4 for scheme and size
+            // size * (getRegisterIndexSize + 1)
+            return 5 + averageNumOfElementsInCounter * (registerIndexSize + 1);
+        }
+        return getStorageBytesEstimate();
+    }
 }

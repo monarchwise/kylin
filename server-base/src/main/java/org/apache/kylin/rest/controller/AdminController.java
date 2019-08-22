@@ -19,6 +19,7 @@
 package org.apache.kylin.rest.controller;
 
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 
 import org.apache.commons.configuration.ConfigurationException;
 import org.apache.kylin.common.KylinConfig;
@@ -40,8 +41,6 @@ import org.springframework.web.bind.annotation.ResponseBody;
 
 /**
  * Admin Controller is defined as Restful API entrance for UI.
- * 
- * @author jianliu
  * 
  */
 @Controller
@@ -67,7 +66,7 @@ public class AdminController extends BasicController {
             envRes.put("env", env);
 
             return envRes;
-        } catch (ConfigurationException e) {
+        } catch (ConfigurationException | UnsupportedEncodingException e) {
             throw new RuntimeException(msg.getGET_ENV_CONFIG_FAIL(), e);
         }
     }
@@ -75,11 +74,19 @@ public class AdminController extends BasicController {
     @RequestMapping(value = "/config", method = { RequestMethod.GET }, produces = { "application/json" })
     @ResponseBody
     public GeneralResponse getConfig() throws IOException {
-        String config = adminService.exportToString();
-
+        String config = KylinConfig.getInstanceFromEnv().exportAllToString();
         GeneralResponse configRes = new GeneralResponse();
         configRes.put("config", config);
 
+        return configRes;
+    }
+
+    @RequestMapping(value = "/public_config", method = { RequestMethod.GET }, produces = { "application/json" })
+    @ResponseBody
+    public GeneralResponse getPublicConfig() throws IOException {
+        final String config = adminService.getPublicConfig();
+        GeneralResponse configRes = new GeneralResponse();
+        configRes.put("config", config);
         return configRes;
     }
 
@@ -97,7 +104,7 @@ public class AdminController extends BasicController {
 
     @RequestMapping(value = "/config", method = { RequestMethod.PUT }, produces = { "application/json" })
     public void updateKylinConfig(@RequestBody UpdateConfigRequest updateConfigRequest) {
-        KylinConfig.getInstanceFromEnv().setProperty(updateConfigRequest.getKey(), updateConfigRequest.getValue());
+        adminService.updateConfig(updateConfigRequest.getKey(), updateConfigRequest.getValue());
     }
 
     public void setAdminService(AdminService adminService) {

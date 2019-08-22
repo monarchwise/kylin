@@ -1,5 +1,6 @@
 {
   "uuid" : "901ed15e-7769-4c66-b7ae-fbdc971cd092",
+  "version": "%default_version%",
   "name" : "kylin_streaming_cube",
   "description" : "",
   "dimensions" : [ {
@@ -142,9 +143,9 @@
   },
   "notify_list" : [ ],
   "status_need_notify" : [ ],
-  "auto_merge_time_ranges" : null,
+  "auto_merge_time_ranges" : [ ],
   "retention_range" : 0,
-  "engine_type" : 2,
-  "storage_type" : 2,
+  "engine_type" : %default_engine_type%,
+  "storage_type" : %default_storage_type%,
   "partition_date_start": 0
 }

@@ -24,8 +24,8 @@ import java.sql.SQLException;
 
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.LocalFileMetadataTestCase;
-import org.apache.kylin.metadata.MetadataManager;
 import org.apache.kylin.metadata.model.ISourceAware;
+import org.apache.kylin.metadata.model.DataModelManager;
 import org.apache.kylin.metadata.project.ProjectInstance;
 import org.apache.kylin.query.H2Database;
 import org.apache.kylin.source.datagen.ModelDataGenerator;
@@ -56,7 +56,7 @@ public class ITJdbcTableReaderTest extends LocalFileMetadataTestCase implements 
         String project = ProjectInstance.DEFAULT_PROJECT_NAME;
         H2Database h2DB = new H2Database(h2Connection, config, project);
 
-        MetadataManager mgr = MetadataManager.getInstance(KylinConfig.getInstanceFromEnv());
+        DataModelManager mgr = DataModelManager.getInstance(KylinConfig.getInstanceFromEnv());
         ModelDataGenerator gen = new ModelDataGenerator(mgr.getDataModelDesc("ci_left_join_model"), 10000);
         gen.generate();
 
@@ -91,7 +91,7 @@ public class ITJdbcTableReaderTest extends LocalFileMetadataTestCase implements 
         int rowNumber = 0;
         while (reader.next()) {
             String[] row = reader.getRow();
-            Assert.assertEquals(11, row.length);
+            Assert.assertEquals(12, row.length);
 
             rowNumber++;
         }
@@ -104,6 +104,11 @@ public class ITJdbcTableReaderTest extends LocalFileMetadataTestCase implements 
     @Override
     public int getSourceType() {
         return ISourceAware.ID_JDBC;
+    }
+
+    @Override
+    public KylinConfig getConfig() {
+        return getTestConfig();
     }
 
 }

@@ -18,27 +18,35 @@
 
 package org.apache.kylin.rest;
 
-import java.io.File;
-import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
-
 import org.apache.catalina.Context;
 import org.apache.catalina.core.AprLifecycleListener;
 import org.apache.catalina.core.StandardServer;
 import org.apache.catalina.deploy.ErrorPage;
 import org.apache.catalina.startup.Tomcat;
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Shell;
 import org.apache.kylin.common.KylinConfig;
+
+import java.io.File;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 
 public class DebugTomcat {
 
     public static void setupDebugEnv() {
         try {
+            System.setProperty("HADOOP_USER_NAME", "root");
             System.setProperty("log4j.configuration", "file:../build/conf/kylin-tools-log4j.properties");
 
             // test_case_data/sandbox/ contains HDP 2.2 site xmls which is dev sandbox
             KylinConfig.setSandboxEnvIfPossible();
+            // Must set SandboxEnv before checking the Kerberos status
+            if (UserGroupInformation.isSecurityEnabled()) {
+                authKrb5();
+            }
             overrideDevJobJarLocations();
 
             System.setProperty("spring.profiles.active", "testing");
@@ -48,8 +56,7 @@ public class DebugTomcat {
                 System.setProperty("catalina.home", ".");
 
             if (StringUtils.isEmpty(System.getProperty("hdp.version"))) {
-                System.err.println("No hdp.version set; Please set hdp.version in your jvm option, for example: -Dhdp.version=2.4.0.0-169");
-                System.exit(1);
+                System.setProperty("hdp.version", "2.4.0.0-169");
             }
 
             // workaround for job submission from win to linux -- https://issues.apache.org/jira/browse/MAPREDUCE-4052
@@ -99,18 +106,29 @@ public class DebugTomcat {
         return null;
     }
 
+    public static void authKrb5() {
+        // The system property "java.security.krb5.conf" should be set
+        try {
+            UserGroupInformation.loginUserFromKeytab(
+                    System.getProperty("java.security.krb5.principal"),
+                    System.getProperty("java.security.krb5.keytab"));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         setupDebugEnv();
-        
+
         int port = 7070;
         if (args.length >= 1) {
             port = Integer.parseInt(args[0]);
         }
 
-        String webBase = new File("../webapp/app").getAbsolutePath();
-        if (new File(webBase, "WEB-INF").exists() == false) {
-            throw new RuntimeException("In order to launch Kylin web app from IDE, please copy server/src/main/webapp/WEB-INF to  webapp/app/");
-        }
+        File webBase = new File("../webapp/app");
+        File webInfDir = new File(webBase, "WEB-INF");
+        FileUtils.deleteDirectory(webInfDir);
+        FileUtils.copyDirectoryToDirectory(new File("../server/src/main/webapp/WEB-INF"), webBase);
 
         Tomcat tomcat = new Tomcat();
         tomcat.setPort(port);
@@ -121,7 +139,7 @@ public class DebugTomcat {
         AprLifecycleListener listener = new AprLifecycleListener();
         server.addLifecycleListener(listener);
 
-        Context webContext = tomcat.addWebapp("/kylin", webBase);
+        Context webContext = tomcat.addWebapp("/kylin", webBase.getAbsolutePath());
         ErrorPage notFound = new ErrorPage();
         notFound.setErrorCode(404);
         notFound.setLocation("/index.html");

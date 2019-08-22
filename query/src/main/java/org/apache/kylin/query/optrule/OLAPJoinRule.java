@@ -48,14 +48,14 @@ public class OLAPJoinRule extends ConverterRule {
         RelNode right = join.getInput(1);
 
         RelTraitSet traitSet = join.getTraitSet().replace(OLAPRel.CONVENTION);
-        left = convert(left, traitSet);
-        right = convert(right, traitSet);
+        left = convert(left, left.getTraitSet().replace(OLAPRel.CONVENTION));
+        right = convert(right, right.getTraitSet().replace(OLAPRel.CONVENTION));
 
         final JoinInfo info = JoinInfo.of(left, right, join.getCondition());
         if (!info.isEqui() && join.getJoinType() != JoinRelType.INNER) {
             // EnumerableJoinRel only supports equi-join. We can put a filter on top
             // if it is an inner join.
-            throw new IllegalArgumentException("We only support equi left join, please check join conditions!");
+            return null;
         }
 
         RelOptCluster cluster = join.getCluster();

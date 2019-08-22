@@ -18,10 +18,14 @@
 
 package org.apache.kylin.job.execution;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import org.apache.kylin.common.KylinConfig;
+import org.apache.kylin.common.lock.DistributedLockFactory;
 import org.apache.kylin.job.exception.ExecuteException;
 
 import com.google.common.collect.Lists;
@@ -30,6 +34,8 @@ import com.google.common.collect.Maps;
 /**
  */
 public class DefaultChainedExecutable extends AbstractExecutable implements ChainedExecutable {
+
+    public static final Integer DEFAULT_PRIORITY = 10;
 
     private final List<AbstractExecutable> subTasks = Lists.newArrayList();
 
@@ -43,7 +49,7 @@ public class DefaultChainedExecutable extends AbstractExecutable implements Chai
             sub.initConfig(config);
         }
     }
-    
+
     @Override
     protected ExecuteResult doWork(ExecutableContext context) throws ExecuteException {
         List<? extends Executable> executables = getTasks();
@@ -58,13 +64,14 @@ public class DefaultChainedExecutable extends AbstractExecutable implements Chai
                 // the job is paused
                 break;
             } else if (state == ExecutableState.ERROR) {
-                throw new IllegalStateException("invalid subtask state, subtask:" + subTask.getName() + ", state:" + subTask.getStatus());
+                throw new IllegalStateException(
+                        "invalid subtask state, subtask:" + subTask.getName() + ", state:" + subTask.getStatus());
             }
             if (subTask.isRunnable()) {
                 return subTask.execute(context);
             }
         }
-        return new ExecuteResult(ExecuteResult.State.SUCCEED, null);
+        return new ExecuteResult(ExecuteResult.State.SUCCEED);
     }
 
     @Override
@@ -77,40 +84,48 @@ public class DefaultChainedExecutable extends AbstractExecutable implements Chai
             info.put(START_TIME, Long.toString(System.currentTimeMillis()));
             getManager().updateJobOutput(getId(), ExecutableState.RUNNING, info, null);
         }
+        getManager().addJobInfo(getId(), BUILD_INSTANCE, DistributedLockFactory.processAndHost());
     }
 
     @Override
     protected void onExecuteError(Throwable exception, ExecutableContext executableContext) {
         super.onExecuteError(exception, executableContext);
-        notifyUserStatusChange(executableContext, ExecutableState.ERROR);
+        onStatusChange(executableContext, ExecuteResult.createError(exception), ExecutableState.ERROR);
     }
 
     @Override
     protected void onExecuteFinished(ExecuteResult result, ExecutableContext executableContext) {
         ExecutableManager mgr = getManager();
-        
+
         if (isDiscarded()) {
             setEndTime(System.currentTimeMillis());
-            notifyUserStatusChange(executableContext, ExecutableState.DISCARDED);
+            onStatusChange(executableContext, result, ExecutableState.DISCARDED);
         } else if (isPaused()) {
             setEndTime(System.currentTimeMillis());
-            notifyUserStatusChange(executableContext, ExecutableState.STOPPED);
+            onStatusChange(executableContext, result, ExecutableState.STOPPED);
         } else if (result.succeed()) {
             List<? extends Executable> jobs = getTasks();
             boolean allSucceed = true;
             boolean hasError = false;
-            boolean hasRunning = false;
             boolean hasDiscarded = false;
             for (Executable task : jobs) {
+                if (task.getStatus() == ExecutableState.RUNNING) {
+                    logger.error(
+                            "There shouldn't be a running subtask[jobId: {}, jobName: {}], \n"
+                                    + "it might cause endless state, will retry to fetch subtask's state.",
+                            task.getId(), task.getName());
+                    getManager().updateJobOutput(task.getId(), ExecutableState.ERROR, null,
+                            "killed due to inconsistent state");
+                    hasError = true;
+                }
+
                 final ExecutableState status = task.getStatus();
+
                 if (status == ExecutableState.ERROR) {
                     hasError = true;
                 }
                 if (status != ExecutableState.SUCCEED) {
                     allSucceed = false;
-                }
-                if (status == ExecutableState.RUNNING) {
-                    hasRunning = true;
                 }
                 if (status == ExecutableState.DISCARDED) {
                     hasDiscarded = true;
@@ -119,13 +134,11 @@ public class DefaultChainedExecutable extends AbstractExecutable implements Chai
             if (allSucceed) {
                 setEndTime(System.currentTimeMillis());
                 mgr.updateJobOutput(getId(), ExecutableState.SUCCEED, null, null);
-                notifyUserStatusChange(executableContext, ExecutableState.SUCCEED);
+                onStatusChange(executableContext, result, ExecutableState.SUCCEED);
             } else if (hasError) {
                 setEndTime(System.currentTimeMillis());
                 mgr.updateJobOutput(getId(), ExecutableState.ERROR, null, null);
-                notifyUserStatusChange(executableContext, ExecutableState.ERROR);
-            } else if (hasRunning) {
-                mgr.updateJobOutput(getId(), ExecutableState.RUNNING, null, null);
+                onStatusChange(executableContext, result, ExecutableState.ERROR);
             } else if (hasDiscarded) {
                 setEndTime(System.currentTimeMillis());
                 mgr.updateJobOutput(getId(), ExecutableState.DISCARDED, null, null);
@@ -135,18 +148,17 @@ public class DefaultChainedExecutable extends AbstractExecutable implements Chai
         } else {
             setEndTime(System.currentTimeMillis());
             mgr.updateJobOutput(getId(), ExecutableState.ERROR, null, result.output());
-            notifyUserStatusChange(executableContext, ExecutableState.ERROR);
+            onStatusChange(executableContext, result, ExecutableState.ERROR);
         }
+    }
+
+    protected void onStatusChange(ExecutableContext context, ExecuteResult result, ExecutableState state) {
+        super.notifyUserStatusChange(context, state);
     }
 
     @Override
     public List<AbstractExecutable> getTasks() {
         return subTasks;
-    }
-
-    @Override
-    protected boolean needRetry() {
-        return false;
     }
 
     public final AbstractExecutable getTaskByName(String name) {
@@ -160,7 +172,37 @@ public class DefaultChainedExecutable extends AbstractExecutable implements Chai
 
     @Override
     public void addTask(AbstractExecutable executable) {
-        executable.setId(getId() + "-" + String.format("%02d", subTasks.size()));
+        executable.setParentExecutable(this);
+        executable.setId(getId() + "-" + String.format(Locale.ROOT, "%02d", subTasks.size()));
         this.subTasks.add(executable);
+    }
+
+    @Override
+    public int getDefaultPriority() {
+        return DEFAULT_PRIORITY;
+    }
+
+    public String findExtraInfo(String key, String dft) {
+        return findExtraInfo(key, dft, false);
+    }
+
+    public String findExtraInfoBackward(String key, String dft) {
+        return findExtraInfo(key, dft, true);
+    }
+
+    private String findExtraInfo(String key, String dft, boolean backward) {
+        ArrayList<AbstractExecutable> tasks = new ArrayList<AbstractExecutable>(getTasks());
+
+        if (backward) {
+            Collections.reverse(tasks);
+        }
+
+        for (AbstractExecutable child : tasks) {
+            Output output = getManager().getOutput(child.getId());
+            String value = output.getExtra().get(key);
+            if (value != null)
+                return value;
+        }
+        return dft;
     }
 }

@@ -20,6 +20,7 @@ package org.apache.kylin.rest.service;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Locale;
 
 import org.apache.kylin.metadata.model.ExternalFilterDesc;
 import org.apache.kylin.rest.constant.Constant;
@@ -40,25 +41,25 @@ public class ExtFilterService extends BasicService {
     public void saveExternalFilter(ExternalFilterDesc desc) throws IOException {
         Message msg = MsgPicker.getMsg();
 
-        if (getMetadataManager().getExtFilterDesc(desc.getName()) != null) {
-            throw new BadRequestException(String.format(msg.getFILTER_ALREADY_EXIST(), desc.getName()));
+        if (getTableManager().getExtFilterDesc(desc.getName()) != null) {
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getFILTER_ALREADY_EXIST(), desc.getName()));
         }
-        getMetadataManager().saveExternalFilter(desc);
+        getTableManager().saveExternalFilter(desc);
     }
 
     @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN)
     public void updateExternalFilter(ExternalFilterDesc desc) throws IOException {
         Message msg = MsgPicker.getMsg();
 
-        if (getMetadataManager().getExtFilterDesc(desc.getName()) == null) {
-            throw new BadRequestException(String.format(msg.getFILTER_NOT_FOUND(), desc.getName()));
+        if (getTableManager().getExtFilterDesc(desc.getName()) == null) {
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getFILTER_NOT_FOUND(), desc.getName()));
         }
-        getMetadataManager().saveExternalFilter(desc);
+        getTableManager().saveExternalFilter(desc);
     }
 
     @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN)
     public void removeExternalFilter(String name) throws IOException {
-        getMetadataManager().removeExternalFilter(name);
+        getTableManager().removeExternalFilter(name);
     }
 
     @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN)
@@ -73,7 +74,7 @@ public class ExtFilterService extends BasicService {
 
     @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN)
     public List<ExternalFilterDesc> listAllExternalFilters() {
-        return getMetadataManager().listAllExternalFilters();
+        return getTableManager().listAllExternalFilters();
     }
 
 }

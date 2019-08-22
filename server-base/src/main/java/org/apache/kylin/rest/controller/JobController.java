@@ -20,7 +20,6 @@ package org.apache.kylin.rest.controller;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,7 +59,7 @@ public class JobController extends BasicController {
     @ResponseBody
     public List<JobInstance> list(JobListRequest jobRequest) {
 
-        List<JobInstance> jobInstanceList = Collections.emptyList();
+        List<JobInstance> jobInstanceList;
         List<JobStatusEnum> statusList = new ArrayList<JobStatusEnum>();
 
         if (null != jobRequest.getStatus()) {
@@ -69,11 +68,23 @@ public class JobController extends BasicController {
             }
         }
 
-        JobTimeFilterEnum timeFilter = JobTimeFilterEnum.getByCode(jobRequest.getTimeFilter());
+        JobTimeFilterEnum timeFilter = JobTimeFilterEnum.LAST_ONE_WEEK;
+        if (null != jobRequest.getTimeFilter()) {
+            timeFilter = JobTimeFilterEnum.getByCode(jobRequest.getTimeFilter());
+        }
+
+        JobService.JobSearchMode jobSearchMode = JobService.JobSearchMode.CUBING_ONLY;
+        if (null != jobRequest.getJobSearchMode()) {
+            try {
+                jobSearchMode = JobService.JobSearchMode.valueOf(jobRequest.getJobSearchMode());
+            } catch (IllegalArgumentException e) {
+                logger.warn("Invalid value for JobSearchMode: '" + jobRequest.getJobSearchMode() + "', skip it.");
+            }
+        }
 
         try {
-            jobInstanceList = jobService.searchJobs(jobRequest.getCubeName(), jobRequest.getProjectName(), statusList,
-                    jobRequest.getLimit(), jobRequest.getOffset(), timeFilter);
+            jobInstanceList = jobService.searchJobsV2(jobRequest.getCubeName(), jobRequest.getProjectName(), statusList,
+                    jobRequest.getLimit(), jobRequest.getOffset(), timeFilter, jobSearchMode);
         } catch (Exception e) {
             logger.error(e.getLocalizedMessage(), e);
             throw new InternalErrorException(e);
@@ -149,7 +160,8 @@ public class JobController extends BasicController {
 
         try {
             final JobInstance jobInstance = jobService.getJobInstance(jobId);
-            return jobService.cancelJob(jobInstance);
+            jobService.cancelJob(jobInstance);
+            return jobService.getJobInstance(jobId);
         } catch (Exception e) {
             logger.error(e.getLocalizedMessage(), e);
             throw new InternalErrorException(e);
@@ -168,7 +180,8 @@ public class JobController extends BasicController {
 
         try {
             final JobInstance jobInstance = jobService.getJobInstance(jobId);
-            return jobService.pauseJob(jobInstance);
+            jobService.pauseJob(jobInstance);
+            return jobService.getJobInstance(jobId);
         } catch (Exception e) {
             logger.error(e.getLocalizedMessage(), e);
             throw new InternalErrorException(e);

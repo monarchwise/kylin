@@ -125,31 +125,6 @@
       "column": "ACCOUNT_COUNTRY"
     },
     {
-      "name": "DEAL_YEAR",
-      "table": "TEST_KYLIN_FACT",
-      "column": "DEAL_YEAR"
-    },
-    {
-      "name": "SELLER_COUNTRY_ABBR",
-      "table": "TEST_KYLIN_FACT",
-      "column": "SELLER_COUNTRY_ABBR"
-    },
-    {
-      "name": "BUYER_COUNTRY_ABBR",
-      "table": "TEST_KYLIN_FACT",
-      "column": "BUYER_COUNTRY_ABBR"
-    },
-    {
-      "name": "SELLER_ID_AND_COUNTRY_NAME",
-      "table": "TEST_KYLIN_FACT",
-      "column": "SELLER_ID_AND_COUNTRY_NAME"
-    },
-    {
-      "name": "BUYER_ID_AND_COUNTRY_NAME",
-      "table": "TEST_KYLIN_FACT",
-      "column": "BUYER_ID_AND_COUNTRY_NAME"
-    },
-    {
       "name": "BUYER_COUNTRY_NAME",
       "table": "BUYER_COUNTRY",
       "column": "NAME"
@@ -187,6 +162,17 @@
           "value": "TEST_KYLIN_FACT.PRICE"
         },
         "returntype": "decimal(19,4)"
+      }
+    },
+    {
+      "name": "GMV_CNT",
+      "function": {
+        "expression": "COUNT",
+        "parameter": {
+          "type": "column",
+          "value": "TEST_KYLIN_FACT.PRICE"
+        },
+        "returntype": "bigint"
       }
     },
     {
@@ -345,21 +331,21 @@
       }
     },
     {
-      "name": "COMPUTED_COLUMN_MEASURE",
+      "name": "TEST_COUNT_COLUMN_CNT",
       "function": {
-        "expression": "SUM",
+        "expression": "COUNT",
         "parameter": {
           "type": "column",
-          "value": "TEST_KYLIN_FACT.DEAL_AMOUNT"
+          "value": "TEST_KYLIN_FACT.TEST_COUNT_COLUMN"
         },
-        "returntype": "decimal"
+        "returntype": "bigint"
       }
     }
   ],
   "dictionaries": [
     {
       "column": "TEST_KYLIN_FACT.TEST_COUNT_DISTINCT_BITMAP",
-      "builder": "org.apache.kylin.dict.GlobalDictionaryBuilder"
+      "builder": "org.apache.kylin.dict.global.SegmentAppendTrieDictBuilder"
     }
   ],
   "rowkey": {
@@ -378,7 +364,8 @@
       },
       {
         "column": "TEST_KYLIN_FACT.LEAF_CATEG_ID",
-        "encoding": "dict"
+        "encoding": "dict",
+        "isShardBy" : true
       },
       {
         "column": "TEST_CATEGORY_GROUPINGS.META_CATEG_NAME",
@@ -445,27 +432,7 @@
         "encoding": "dict"
       },
       {
-        "column": "TEST_KYLIN_FACT.DEAL_YEAR",
-        "encoding": "int:2"
-      },
-      {
         "column": "SELLER_COUNTRY.NAME",
-        "encoding": "dict"
-      },
-      {
-        "column": "TEST_KYLIN_FACT.SELLER_COUNTRY_ABBR",
-        "encoding": "dict"
-      },
-      {
-        "column": "TEST_KYLIN_FACT.BUYER_COUNTRY_ABBR",
-        "encoding": "dict"
-      },
-      {
-        "column": "TEST_KYLIN_FACT.SELLER_ID_AND_COUNTRY_NAME",
-        "encoding": "dict"
-      },
-      {
-        "column": "TEST_KYLIN_FACT.BUYER_ID_AND_COUNTRY_NAME",
         "encoding": "dict"
       }
     ]
@@ -484,9 +451,10 @@
               "TRANS_CNT",
               "ITEM_COUNT_SUM",
               "GMV_SUM",
+              "GMV_CNT",
               "GMV_MIN",
               "GMV_MAX",
-              "COMPUTED_COLUMN_MEASURE"
+              "TEST_COUNT_COLUMN_CNT"
             ]
           }
         ]
@@ -512,11 +480,11 @@
             "qualifier": "m",
             "measure_refs": [
               "TEST_EXTENDED_COLUMN",
+              "BUYER_CONTACT",
+              "SELLER_CONTACT",
               "TRANS_ID_RAW",
               "PRICE_RAW",
-              "CAL_DT_RAW",
-              "BUYER_CONTACT",
-              "SELLER_CONTACT"
+              "CAL_DT_RAW"
             ]
           }
         ]
@@ -533,8 +501,7 @@
         "TEST_KYLIN_FACT.SLR_SEGMENT_CD",
         "TEST_CATEGORY_GROUPINGS.META_CATEG_NAME",
         "TEST_CATEGORY_GROUPINGS.CATEG_LVL2_NAME",
-        "TEST_CATEGORY_GROUPINGS.CATEG_LVL3_NAME",
-        "TEST_KYLIN_FACT.DEAL_YEAR"
+        "TEST_CATEGORY_GROUPINGS.CATEG_LVL3_NAME"
       ],
       "select_rule": {
         "hierarchy_dims": [
@@ -550,8 +517,7 @@
           [
             "TEST_KYLIN_FACT.LSTG_FORMAT_NAME",
             "TEST_KYLIN_FACT.LSTG_SITE_ID",
-            "TEST_KYLIN_FACT.SLR_SEGMENT_CD",
-            "TEST_KYLIN_FACT.DEAL_YEAR"
+            "TEST_KYLIN_FACT.SLR_SEGMENT_CD"
           ]
         ],
         "dim_cap": 3
@@ -579,11 +545,7 @@
         "BUYER_ACCOUNT.ACCOUNT_BUYER_LEVEL",
         "BUYER_ACCOUNT.ACCOUNT_SELLER_LEVEL",
         "BUYER_ACCOUNT.ACCOUNT_COUNTRY",
-        "BUYER_COUNTRY.NAME",
-        "TEST_KYLIN_FACT.SELLER_COUNTRY_ABBR",
-        "TEST_KYLIN_FACT.BUYER_COUNTRY_ABBR",
-        "TEST_KYLIN_FACT.SELLER_ID_AND_COUNTRY_NAME",
-        "TEST_KYLIN_FACT.BUYER_ID_AND_COUNTRY_NAME"
+        "BUYER_COUNTRY.NAME"
       ],
       "select_rule": {
         "hierarchy_dims": [],
@@ -600,11 +562,7 @@
           [
             "TEST_KYLIN_FACT.LSTG_FORMAT_NAME",
             "TEST_KYLIN_FACT.LSTG_SITE_ID",
-            "TEST_KYLIN_FACT.SLR_SEGMENT_CD",
-            "TEST_KYLIN_FACT.SELLER_COUNTRY_ABBR",
-            "TEST_KYLIN_FACT.BUYER_COUNTRY_ABBR",
-            "TEST_KYLIN_FACT.SELLER_ID_AND_COUNTRY_NAME",
-            "TEST_KYLIN_FACT.BUYER_ID_AND_COUNTRY_NAME"
+            "TEST_KYLIN_FACT.SLR_SEGMENT_CD"
           ],
           [
             "TEST_KYLIN_FACT.SELLER_ID",
@@ -635,7 +593,9 @@
   "engine_type": 4,
   "storage_type": 2,
   "override_kylin_properties": {
-    "kylin.cube.algorithm": "LAYER"
+    "kylin.cube.algorithm": "LAYER",
+    "kylin.dictionary.shrunken-from-global-enabled": "false",
+    "kylin.dictionary.mr-hive.columns": "TEST_KYLIN_FACT_TEST_COUNT_DISTINCT_BITMAP"
   },
   "partition_date_start": 0
 }

@@ -18,11 +18,13 @@
 
 package org.apache.kylin.metadata.datatype;
 
+import java.nio.ByteBuffer;
+import java.util.Locale;
+
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.BooleanUtils;
 
-import java.nio.ByteBuffer;
-
+@SuppressWarnings("serial")
 public class BooleanSerializer extends DataTypeSerializer<Long> {
 
     public final static String[] TRUE_VALUE_SET = { "true", "t", "on", "yes" };
@@ -58,8 +60,9 @@ public class BooleanSerializer extends DataTypeSerializer<Long> {
     @Override
     public Long valueOf(String str) {
         if (str == null)
-           return Long.valueOf(0L);
+            return Long.valueOf(0L);
         else
-            return Long.valueOf(BooleanUtils.toInteger(ArrayUtils.contains(TRUE_VALUE_SET, str.toLowerCase())));
+            return Long
+                    .valueOf(BooleanUtils.toInteger(ArrayUtils.contains(TRUE_VALUE_SET, str.toLowerCase(Locale.ROOT))));
     }
 }

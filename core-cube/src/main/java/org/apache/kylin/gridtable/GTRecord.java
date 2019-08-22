@@ -27,7 +27,7 @@ import org.apache.kylin.common.util.ImmutableBitSet;
 
 import com.google.common.base.Preconditions;
 
-public class GTRecord implements Comparable<GTRecord>, Cloneable {
+public class GTRecord implements Comparable<GTRecord> {
 
     final transient GTInfo info;
     final ByteArray[] cols;
@@ -45,20 +45,11 @@ public class GTRecord implements Comparable<GTRecord>, Cloneable {
         }
         this.info = info;
     }
-    
-    @Override
-    public GTRecord clone() { // deep copy
-        ByteArray[] cols = new ByteArray[this.cols.length];
-        for (int i = 0; i < cols.length; i++) {
-            cols[i] = this.cols[i].copy();
-        }
-        return new GTRecord(this.info, cols);
-    }
 
     public void shallowCopyFrom(GTRecord source) {
         assert info == source.info;
         for (int i = 0; i < cols.length; i++) {
-            cols[i].set(source.cols[i]);
+            cols[i].reset(source.cols[i].array(), source.cols[i].offset(), source.cols[i].length());
         }
     }
 
@@ -70,12 +61,24 @@ public class GTRecord implements Comparable<GTRecord>, Cloneable {
         return cols[i];
     }
 
+    public Object getValue(int i) {
+        return info.codeSystem.decodeColumnValue(i, cols[i].asBuffer());
+    }
+
     public ByteArray[] getInternal() {
         return cols;
     }
 
     public void set(int i, ByteArray data) {
-        cols[i].set(data.array(), data.offset(), data.length());
+        cols[i].reset(data.array(), data.offset(), data.length());
+    }
+
+    public void setValue(int i, Object value) {
+        ByteArray space = new ByteArray(info.codeSystem.maxCodeLength(i));
+        ByteBuffer buf = space.asBuffer();
+        info.codeSystem.encodeColumnValue(i, value, buf);
+        set(i, space);
+        cols[i].reset(buf.array(), buf.arrayOffset(), buf.position());
     }
 
     /** set record to the codes of specified values, new space allocated to hold the codes */
@@ -94,7 +97,7 @@ public class GTRecord implements Comparable<GTRecord>, Cloneable {
             int c = selectedCols.trueBitAt(i);
             info.codeSystem.encodeColumnValue(c, values[i], buf);
             int newPos = buf.position();
-            cols[c].set(buf.array(), buf.arrayOffset() + pos, newPos - pos);
+            cols[c].reset(buf.array(), buf.arrayOffset() + pos, newPos - pos);
             pos = newPos;
         }
         return this;
@@ -113,7 +116,6 @@ public class GTRecord implements Comparable<GTRecord>, Cloneable {
         }
         return result;
     }
-
 
     /** decode and return the values of this record */
     public Object[] getValues(int[] selectedColumns, Object[] result) {
@@ -139,26 +141,6 @@ public class GTRecord implements Comparable<GTRecord>, Cloneable {
             size += cols[c].length();
         }
         return size;
-    }
-
-    public GTRecord copy() {
-        return copy(info.colAll);
-    }
-
-    public GTRecord copy(ImmutableBitSet selectedCols) {
-        int len = sizeOf(selectedCols);
-        byte[] space = new byte[len];
-
-        GTRecord copy = new GTRecord(info);
-        int pos = 0;
-        for (int i = 0; i < selectedCols.trueBitCount(); i++) {
-            int c = selectedCols.trueBitAt(i);
-            System.arraycopy(cols[c].array(), cols[c].offset(), space, pos, cols[c].length());
-            copy.cols[c].set(space, pos, cols[c].length());
-            pos += cols[c].length();
-        }
-
-        return copy;
     }
 
     @Override
@@ -281,6 +263,11 @@ public class GTRecord implements Comparable<GTRecord>, Cloneable {
         loadColumns(info.colBlocks[c], buf);
     }
 
+    /** change pointers to point to data in given buffer, UNLIKE deserialize */
+    public void loadColumns(ByteBuffer buf) {
+        loadColumns(info.colAll, buf);
+    }
+
     /**
      * Change pointers to point to data in given buffer, UNLIKE deserialize
      * @param selectedCols positions of column to load
@@ -290,18 +277,35 @@ public class GTRecord implements Comparable<GTRecord>, Cloneable {
         int pos = buf.position();
         for (int c : selectedCols) {
             int len = info.codeSystem.codeLength(c, buf);
-            cols[c].set(buf.array(), buf.arrayOffset() + pos, len);
+            cols[c].reset(buf.array(), buf.arrayOffset() + pos, len);
             pos += len;
             buf.position(pos);
         }
     }
+
 
     /** change pointers to point to data in given buffer, this
      *  method allows to defined specific column to load */
     public void loadColumns(int selectedCol, ByteBuffer buf) {
         int pos = buf.position();
         int len = info.codeSystem.codeLength(selectedCol, buf);
-        cols[selectedCol].set(buf.array(), buf.arrayOffset() + pos, len);
+        cols[selectedCol].reset(buf.array(), buf.arrayOffset() + pos, len);
+    }
+
+    public void loadColumnsFromColumnBlocks(ImmutableBitSet[] selectedColumnBlocks, ImmutableBitSet selectedCols,
+            ByteBuffer buf) {
+        int pos = buf.position();
+        for (ImmutableBitSet selectedColBlock : selectedColumnBlocks) {
+            for (int i = 0; i < selectedColBlock.trueBitCount(); i++) {
+                int c = selectedColBlock.trueBitAt(i);
+                int len = info.codeSystem.codeLength(c, buf);
+                if (selectedCols.get(c)) {
+                    cols[c].reset(buf.array(), buf.arrayOffset() + pos, len);
+                }
+                pos += len;
+                buf.position(pos);
+            }
+        }
     }
 
 }

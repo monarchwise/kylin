@@ -19,25 +19,29 @@
 package org.apache.kylin.cube.cli;
 
 import java.io.IOException;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
+import org.apache.hadoop.io.IOUtils;
 import org.apache.kylin.common.KylinConfig;
+import org.apache.kylin.common.persistence.ResourceStore;
 import org.apache.kylin.common.util.Dictionary;
 import org.apache.kylin.cube.CubeInstance;
 import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.CubeSegment;
 import org.apache.kylin.cube.model.DimensionDesc;
-import org.apache.kylin.dict.DictionaryManager;
+import org.apache.kylin.dict.DictionaryInfo;
+import org.apache.kylin.dict.DictionaryInfoSerializer;
 import org.apache.kylin.dict.DictionaryProvider;
 import org.apache.kylin.dict.DistinctColumnValuesProvider;
-import org.apache.kylin.metadata.MetadataManager;
-import org.apache.kylin.metadata.model.DataModelDesc;
+import org.apache.kylin.dict.lookup.ILookupTable;
+import org.apache.kylin.dict.lookup.SnapshotTable;
+import org.apache.kylin.dict.lookup.SnapshotTableSerializer;
 import org.apache.kylin.metadata.model.JoinDesc;
-import org.apache.kylin.metadata.model.TableDesc;
 import org.apache.kylin.metadata.model.TableRef;
 import org.apache.kylin.metadata.model.TblColRef;
 import org.apache.kylin.source.IReadableTable;
-import org.apache.kylin.source.SourceFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,33 +49,57 @@ import com.google.common.collect.Sets;
 
 public class DictionaryGeneratorCLI {
 
+    private DictionaryGeneratorCLI() {
+    }
+
     private static final Logger logger = LoggerFactory.getLogger(DictionaryGeneratorCLI.class);
 
-    public static void processSegment(KylinConfig config, String cubeName, String segmentID, DistinctColumnValuesProvider factTableValueProvider, DictionaryProvider dictProvider) throws IOException {
+    public static void processSegment(KylinConfig config, String cubeName, String segmentID, String uuid,
+            DistinctColumnValuesProvider factTableValueProvider, DictionaryProvider dictProvider) throws IOException {
         CubeInstance cube = CubeManager.getInstance(config).getCube(cubeName);
         CubeSegment segment = cube.getSegmentById(segmentID);
 
-        processSegment(config, segment, factTableValueProvider, dictProvider);
+        int retryTime = 0;
+        while (retryTime < 3) {
+            if (retryTime > 0) {
+                logger.info("Rebuild dictionary and snapshot for Cube: {}, Segment: {}, {} times.", cubeName, segmentID,
+                        retryTime);
+            }
+
+            processSegment(config, segment, uuid, factTableValueProvider, dictProvider);
+
+            if (isAllDictsAndSnapshotsReady(config, cubeName, segmentID)) {
+                break;
+            }
+            retryTime++;
+        }
+
+        if (retryTime >= 3) {
+            logger.error("Not all dictionaries and snapshots ready for cube segment: {}", segmentID);
+        } else {
+            logger.info("Succeed to build all dictionaries and snapshots for cube segment: {}", segmentID);
+        }
     }
 
-    private static void processSegment(KylinConfig config, CubeSegment cubeSeg, DistinctColumnValuesProvider factTableValueProvider, DictionaryProvider dictProvider) throws IOException {
+    private static void processSegment(KylinConfig config, CubeSegment cubeSeg, String uuid,
+            DistinctColumnValuesProvider factTableValueProvider, DictionaryProvider dictProvider) throws IOException {
         CubeManager cubeMgr = CubeManager.getInstance(config);
 
         // dictionary
         for (TblColRef col : cubeSeg.getCubeDesc().getAllColumnsNeedDictionaryBuilt()) {
-            logger.info("Building dictionary for " + col);
-            IReadableTable inpTable = decideInputTable(cubeSeg.getModel(), col, factTableValueProvider);
+            logger.info("Building dictionary for {}", col);
+            IReadableTable inpTable = factTableValueProvider.getDistinctValuesFor(col);
+
+            Dictionary<String> preBuiltDict = null;
             if (dictProvider != null) {
-                Dictionary<String> dict = dictProvider.getDictionary(col);
-                if (dict != null) {
-                    logger.debug("Dict for '" + col.getName() + "' has already been built, save it");
-                    cubeMgr.saveDictionary(cubeSeg, col, inpTable, dict);
-                } else {
-                    logger.debug("Dict for '" + col.getName() + "' not pre-built, build it from " + inpTable.toString());
-                    cubeMgr.buildDictionary(cubeSeg, col, inpTable);
-                }
+                preBuiltDict = dictProvider.getDictionary(col);
+            }
+
+            if (preBuiltDict != null) {
+                logger.debug("Dict for '{}' has already been built, save it", col.getName());
+                cubeMgr.saveDictionary(cubeSeg, col, inpTable, preBuiltDict);
             } else {
-                logger.debug("Dict for '" + col.getName() + "' not pre-built, build it from " + inpTable.toString());
+                logger.debug("Dict for '{}' not pre-built, build it from {}", col.getName(), inpTable);
                 cubeMgr.buildDictionary(cubeSeg, col, inpTable);
             }
         }
@@ -82,37 +110,80 @@ public class DictionaryGeneratorCLI {
         for (DimensionDesc dim : cubeSeg.getCubeDesc().getDimensions()) {
             TableRef table = dim.getTableRef();
             if (cubeSeg.getModel().isLookupTable(table)) {
-                toSnapshot.add(table.getTableIdentity());
-                toCheckLookup.add(table);
+                // only the snapshot desc is not ext type, need to take snapshot
+                if (!cubeSeg.getCubeDesc().isExtSnapshotTable(table.getTableIdentity())) {
+                    toSnapshot.add(table.getTableIdentity());
+                    toCheckLookup.add(table);
+                }
             }
         }
 
         for (String tableIdentity : toSnapshot) {
-            logger.info("Building snapshot of " + tableIdentity);
-            cubeMgr.buildSnapshotTable(cubeSeg, tableIdentity);
+            logger.info("Building snapshot of {}", tableIdentity);
+            cubeMgr.buildSnapshotTable(cubeSeg, tableIdentity, uuid);
         }
-        
+
+        CubeInstance updatedCube = cubeMgr.getCube(cubeSeg.getCubeInstance().getName());
+        cubeSeg = updatedCube.getSegmentById(cubeSeg.getUuid());
         for (TableRef lookup : toCheckLookup) {
-            logger.info("Checking snapshot of " + lookup);
-            JoinDesc join = cubeSeg.getModel().getJoinsTree().getJoinByPKSide(lookup);
-            cubeMgr.getLookupTable(cubeSeg, join);
+            logger.info("Checking snapshot of {}", lookup);
+            try {
+                JoinDesc join = cubeSeg.getModel().getJoinsTree().getJoinByPKSide(lookup);
+                ILookupTable table = cubeMgr.getLookupTable(cubeSeg, join);
+                if (table != null) {
+                    IOUtils.closeStream(table);
+                }
+            } catch (Throwable th) {
+                throw new RuntimeException(String.format(Locale.ROOT, "Checking snapshot of %s failed.", lookup), th);
+            }
         }
     }
 
-    private static IReadableTable decideInputTable(DataModelDesc model, TblColRef col, DistinctColumnValuesProvider factTableValueProvider) {
-        KylinConfig config = model.getConfig();
-        DictionaryManager dictMgr = DictionaryManager.getInstance(config);
-        TblColRef srcCol = dictMgr.decideSourceData(model, col);
-        String srcTable = srcCol.getTable();
+    private static boolean isAllDictsAndSnapshotsReady(KylinConfig config, String cubeName, String segmentID) {
+        CubeInstance cube = CubeManager.getInstance(config).reloadCube(cubeName);
+        CubeSegment segment = cube.getSegmentById(segmentID);
+        ResourceStore store = ResourceStore.getStore(config);
 
-        IReadableTable inpTable;
-        if (model.isFactTable(srcTable)) {
-            inpTable = factTableValueProvider.getDistinctValuesFor(srcCol);
-        } else {
-            MetadataManager metadataManager = MetadataManager.getInstance(config);
-            TableDesc tableDesc = new TableDesc(metadataManager.getTableDesc(srcTable, model.getProject()));
-            inpTable = SourceFactory.createReadableTable(tableDesc);
+        // check dicts
+        logger.info("Begin to check if all dictionaries exist of Segment: {}", segmentID);
+        Map<String, String> dictionaries = segment.getDictionaries();
+        for (Map.Entry<String, String> entry : dictionaries.entrySet()) {
+            String dictResPath = entry.getValue();
+            String dictKey = entry.getKey();
+            try {
+                DictionaryInfo dictInfo = store.getResource(dictResPath, DictionaryInfoSerializer.INFO_SERIALIZER);
+                if (dictInfo == null) {
+                    logger.warn("Dictionary=[key: {}, resource path: {}] doesn't exist in resource store", dictKey,
+                            dictResPath);
+                    return false;
+                }
+            } catch (IOException e) {
+                logger.warn("Dictionary=[key: {}, path: {}] failed to check, details: {}", dictKey, dictResPath, e);
+                return false;
+            }
         }
-        return inpTable;
+
+        // check snapshots
+        logger.info("Begin to check if all snapshots exist of Segment: {}", segmentID);
+        Map<String, String> snapshots = segment.getSnapshots();
+        for (Map.Entry<String, String> entry : snapshots.entrySet()) {
+            String snapshotKey = entry.getKey();
+            String snapshotResPath = entry.getValue();
+            try {
+                SnapshotTable snapshot = store.getResource(snapshotResPath, SnapshotTableSerializer.INFO_SERIALIZER);
+                if (snapshot == null) {
+                    logger.info("SnapshotTable=[key: {}, resource path: {}] doesn't exist in resource store",
+                            snapshotKey, snapshotResPath);
+                    return false;
+                }
+            } catch (IOException e) {
+                logger.warn("SnapshotTable=[key: {}, resource path: {}]  failed to check, details: {}", snapshotKey,
+                        snapshotResPath, e);
+                return false;
+            }
+        }
+
+        logger.info("All dictionaries and snapshots exist checking succeed for Cube Segment: {}", segmentID);
+        return true;
     }
 }

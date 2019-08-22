@@ -21,9 +21,8 @@ KylinApp.service('kylinConfig', function (AdminService, $log) {
   var timezone;
   var deployEnv;
 
-
   this.init = function () {
-    return AdminService.config({}, function (config) {
+    return AdminService.publicConfig({}, function (config) {
       _config = config.config;
     }, function (e) {
       $log.error("failed to load kylin.properties" + e);
@@ -31,11 +30,16 @@ KylinApp.service('kylinConfig', function (AdminService, $log) {
   };
 
   this.getProperty = function (name) {
-    var keyIndex = _config.indexOf(name);
+    if(angular.isUndefined(name)
+        || name.length === 0
+        || angular.isUndefined(_config)){
+      return '';
+    }
+    var keyIndex = _config.indexOf(name + '=');
     var keyLength = name.length;
     var partialResult = _config.substr(keyIndex);
     var preValueIndex = partialResult.indexOf("=");
-    var sufValueIndex = partialResult.indexOf("\n");
+    var sufValueIndex = partialResult.indexOf("\n", 2);
     return partialResult.substring(preValueIndex + 1, sufValueIndex);
 
   }
@@ -94,6 +98,7 @@ KylinApp.service('kylinConfig', function (AdminService, $log) {
       Config.reference_links.hadoop.link = this.getProperty("kylin.web.link-hadoop").trim();
       Config.reference_links.diagnostic.link = this.getProperty("kylin.web.link-diagnostic").trim();
       Config.contact_mail = this.getProperty("kylin.web.contact-mail").trim();
+      Config.documents = [];
       var doc_length = this.getProperty("kylin.web.help.length").trim();
       for (var i = 0; i < doc_length; i++) {
         var _doc = {};
@@ -107,5 +112,70 @@ KylinApp.service('kylinConfig', function (AdminService, $log) {
     }
   }
 
+  this.isExternalAclEnabled = function() {
+    var status = this.getProperty("kylin.server.external-acl-provider").trim();
+    if (status == '') {
+      return false;
+    }
+    return true;
+  }
+
+  this.isAdminExportAllowed = function(){
+    var status = this.getProperty("kylin.web.export-allow-admin").trim();
+    if(status!=='false'){
+      return true;
+    }
+    return false;
+  }
+
+  this.isNonAdminExportAllowed = function(){
+    var status = this.getProperty("kylin.web.export-allow-other").trim();
+    if(status!=='false'){
+      return true;
+    }
+    return false;
+  }
+
+  this.getHiddenMeasures = function() {
+    var hide_measures = this.getProperty("kylin.web.hide-measures").replace(/\s/g,"").toUpperCase();
+    return hide_measures.split(",")
+  }
+
+
+  this.getQueryTimeout = function () {
+    var queryTimeout = parseInt(this.getProperty("kylin.web.query-timeout"));
+    if (isNaN(queryTimeout)) {
+       queryTimeout = 300000;
+    }
+    return queryTimeout;
+  }
+
+  this.isInitialized = function() {
+    return angular.isString(_config);
+  }
+
+  this.isAutoMigrateCubeEnabled = function(){
+    var status = this.getProperty("kylin.tool.auto-migrate-cube.enabled").trim();
+    if(status && status =='true'){
+      return true;
+    }
+    return false;
+  }
+
+  this.getSourceType = function(){
+    this.sourceType = this.getProperty("kylin.source.default").trim();
+    if (!this.sourceType) {
+      return '0';
+    }
+    return this.sourceType;
+  }
+  this.getSecurityType = function () {
+    this.securityType = this.getProperty("kylin.security.profile").trim();
+    return this.securityType;
+  }
+  this.page = {
+    offset: 1,
+    limit: 15
+  }
 });
 

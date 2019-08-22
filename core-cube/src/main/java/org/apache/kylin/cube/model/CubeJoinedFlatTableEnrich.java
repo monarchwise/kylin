@@ -53,8 +53,7 @@ public class CubeJoinedFlatTableEnrich implements IJoinedFlatTableDesc, Serializ
 
     // check what columns from hive tables are required, and index them
     private void parseCubeDesc() {
-        long baseCuboidId = Cuboid.getBaseCuboidId(cubeDesc);
-        Cuboid baseCuboid = Cuboid.findById(cubeDesc, baseCuboidId);
+        Cuboid baseCuboid = Cuboid.getBaseCuboid(cubeDesc);
 
         // build index for rowkey columns
         List<TblColRef> cuboidColumns = baseCuboid.getColumns();
@@ -106,6 +105,11 @@ public class CubeJoinedFlatTableEnrich implements IJoinedFlatTableDesc, Serializ
     }
 
     @Override
+    public List<TblColRef> getFactColumns() {
+        return flatDesc.getFactColumns();
+    }
+
+    @Override
     public DataModelDesc getDataModel() {
         return flatDesc.getDataModel();
     }
@@ -128,6 +132,11 @@ public class CubeJoinedFlatTableEnrich implements IJoinedFlatTableDesc, Serializ
     @Override
     public ISegment getSegment() {
         return flatDesc.getSegment();
+    }
+
+    @Override
+    public boolean useAlias() {
+        return flatDesc.useAlias();
     }
 
     @Override

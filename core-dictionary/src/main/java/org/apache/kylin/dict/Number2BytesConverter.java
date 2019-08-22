@@ -19,8 +19,12 @@ package org.apache.kylin.dict;
 
 import java.io.Serializable;
 import java.math.BigDecimal;
+import java.util.Map;
 
+import org.apache.kylin.common.threadlocal.InternalThreadLocal;
 import org.apache.kylin.common.util.Bytes;
+
+import com.google.common.collect.Maps;
 
 /**
  * Created by xiefan on 17-1-20.
@@ -35,13 +39,18 @@ public class Number2BytesConverter implements BytesConverter<String>, Serializab
 
     int maxDigitsBeforeDecimalPoint;
 
-    static final transient ThreadLocal<NumberBytesCodec> LOCAL = new ThreadLocal<NumberBytesCodec>();
+    static final transient InternalThreadLocal<Map<Integer, NumberBytesCodec>> LOCAL = new InternalThreadLocal<Map<Integer, NumberBytesCodec>>();
 
     static NumberBytesCodec getCodec(int maxDigitsBeforeDecimalPoint) {
-        NumberBytesCodec codec = LOCAL.get();
+        Map<Integer, NumberBytesCodec> codecMap = LOCAL.get();
+        if (codecMap == null) {
+            codecMap = Maps.newHashMap();
+            LOCAL.set(codecMap);
+        }
+        NumberBytesCodec codec = codecMap.get(maxDigitsBeforeDecimalPoint);
         if (codec == null) {
             codec = new NumberBytesCodec(maxDigitsBeforeDecimalPoint);
-            LOCAL.set(codec);
+            codecMap.put(maxDigitsBeforeDecimalPoint, codec);
         }
         return codec;
     }
@@ -92,6 +101,20 @@ public class Number2BytesConverter implements BytesConverter<String>, Serializab
         int len = codec.decodeNumber(backup, 0);
         codec.buf = backup;
         return Bytes.toString(backup, 0, len);
+    }
+
+    @Override
+    public byte[] convertBytesValueFromBytes(byte[] b, int offset, int length) {
+        NumberBytesCodec codec = getCodec(this.maxDigitsBeforeDecimalPoint);
+        byte[] backup = codec.buf;
+        codec.buf = b;
+        codec.bufOffset = offset;
+        codec.bufLen = length;
+        int len = codec.decodeNumber(backup, 0);
+        codec.buf = backup;
+        byte[] bytes = new byte[len];
+        System.arraycopy(backup, 0, bytes, 0 , len);
+        return bytes;
     }
 
     // encode a number into an order preserving byte sequence

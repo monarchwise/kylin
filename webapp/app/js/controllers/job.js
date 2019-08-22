@@ -19,17 +19,29 @@
 'use strict';
 
 KylinApp
-    .controller('JobCtrl', function ($scope, $q, $routeParams, $interval, $modal, ProjectService, MessageService, JobService,SweetAlert,loadingRequest,UserService,jobConfig,JobList,$window) {
+    .controller('JobCtrl', function ($scope, $q, $routeParams, $interval, $modal, ProjectService, MessageService, JobService,SweetAlert,loadingRequest,UserService,jobConfig,JobList,$window, MessageBox) {
 
         $scope.jobList = JobList;
         JobList.removeAll();
         $scope.jobConfig = jobConfig;
-        $scope.cubeName = null;
+        $scope.cubeName = JobList.jobFilter.cubeName;
         //$scope.projects = [];
         $scope.action = {};
-        $scope.timeFilter = jobConfig.timeFilter[1];
+        $scope.timeFilter = jobConfig.timeFilter[JobList.jobFilter.timeFilterId];
+        $scope.searchMode = jobConfig.searchMode[JobList.jobFilter.searchModeId];
+        if ($routeParams.jobTimeFilter) {
+            $scope.timeFilter = jobConfig.timeFilter[$routeParams.jobTimeFilter];
+        }
 
         $scope.status = [];
+        for(var i in JobList.jobFilter.statusIds){
+            for(var j in jobConfig.allStatus){
+                if(JobList.jobFilter.statusIds[i] == jobConfig.allStatus[j].value){
+                    $scope.status.push(jobConfig.allStatus[j]);
+                    break;
+                }
+            }
+        }
         $scope.toggleSelection = function toggleSelection(current) {
             var idx = $scope.status.indexOf(current);
             if (idx > -1) {
@@ -68,7 +80,11 @@ KylinApp
                 statusIds.push(statusObj.value);
             });
 
-          $scope.cubeName=$scope.cubeName == ""?null:$scope.cubeName;
+            $scope.cubeName=$scope.cubeName == ""?null:$scope.cubeName;
+            JobList.jobFilter.cubeName = $scope.cubeName;
+            JobList.jobFilter.timeFilterId = $scope.timeFilter.value;
+            JobList.jobFilter.searchModeId = _.indexOf(jobConfig.searchMode, $scope.searchMode);
+            JobList.jobFilter.statusIds = statusIds;
 
             var jobRequest = {
                 cubeName: $scope.cubeName,
@@ -76,7 +92,8 @@ KylinApp
                 status: statusIds,
                 offset: offset,
                 limit: limit,
-                timeFilter: $scope.timeFilter.value
+                timeFilter: $scope.timeFilter.value,
+                jobSearchMode: $scope.searchMode.value
             };
             $scope.state.loading = true;
 
@@ -127,7 +144,7 @@ KylinApp
                   if (angular.isDefined($scope.state.selectedJob)) {
                     $scope.state.selectedJob = JobList.jobs[$scope.state.selectedJob.uuid];
                   }
-                  SweetAlert.swal('Success!', 'Job has been resumed successfully!', 'success');
+                  MessageBox.successNotify('Job has been resumed successfully!');
                 }, function (e) {
                   loadingRequest.hide();
                   if (e.data && e.data.exception) {
@@ -164,7 +181,7 @@ KylinApp
                         }
 
                     });
-                    SweetAlert.swal('Success!', 'Job has been discarded successfully!', 'success');
+                    MessageBox.successNotify('Job has been discarded successfully!');
                 },function(e){
                     loadingRequest.hide();
                     if(e.data&& e.data.exception){
@@ -200,7 +217,7 @@ KylinApp
                 }
 
               });
-              SweetAlert.swal('Success!', 'Job has been paused successfully!', 'success');
+              MessageBox.successNotify('Job has been paused successfully!');
             },function(e){
               loadingRequest.hide();
               if(e.data&& e.data.exception){
@@ -229,7 +246,7 @@ KylinApp
             loadingRequest.show();
             JobService.drop({jobId: job.uuid}, {}, function (job) {
               loadingRequest.hide();
-              SweetAlert.swal('Success!', 'Job has been dropped successfully!', 'success');
+              MessageBox.successNotify('Job has been dropped successfully!');
               $scope.jobList.jobs[job.uuid].dropped = true;
             },function(e){
               loadingRequest.hide();

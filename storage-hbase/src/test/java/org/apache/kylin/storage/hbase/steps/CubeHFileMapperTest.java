@@ -21,6 +21,7 @@ package org.apache.kylin.storage.hbase.steps;
 import static org.junit.Assert.assertEquals;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import org.apache.hadoop.hbase.KeyValue;
@@ -39,7 +40,7 @@ import org.junit.Test;
  */
 public class CubeHFileMapperTest {
 
-    MapDriver<Text, Text, ImmutableBytesWritable, KeyValue> mapDriver;
+    MapDriver<Text, Text, RowKeyWritable, KeyValue> mapDriver;
 
     private String cube_name = "FLAT_ITEM_CUBE";
 
@@ -57,24 +58,24 @@ public class CubeHFileMapperTest {
 
         mapDriver.addInput(new Text("52010tech"), new Text("35.432"));
 
-        List<Pair<ImmutableBytesWritable, KeyValue>> result = mapDriver.run();
+        List<Pair<RowKeyWritable, KeyValue>> result = mapDriver.run();
 
         assertEquals(2, result.size());
 
         byte[] bytes = { 0, 0, 0, 0, 0, 0, 0, 119, 33, 0, 22, 1, 0, 121, 7 };
         ImmutableBytesWritable key = new ImmutableBytesWritable(bytes);
 
-        Pair<ImmutableBytesWritable, KeyValue> p1 = result.get(0);
-        Pair<ImmutableBytesWritable, KeyValue> p2 = result.get(1);
+        Pair<RowKeyWritable, KeyValue> p1 = result.get(0);
+        Pair<RowKeyWritable, KeyValue> p2 = result.get(1);
 
         assertEquals(key, p1.getFirst());
-        assertEquals("cf1", new String(p1.getSecond().getFamily()));
-        assertEquals("usd_amt", new String(p1.getSecond().getQualifier()));
-        assertEquals("35.43", new String(p1.getSecond().getValue()));
+        assertEquals("cf1", new String(p1.getSecond().getFamily(), StandardCharsets.UTF_8));
+        assertEquals("usd_amt", new String(p1.getSecond().getQualifier(), StandardCharsets.UTF_8));
+        assertEquals("35.43", new String(p1.getSecond().getValue(), StandardCharsets.UTF_8));
 
         assertEquals(key, p2.getFirst());
-        assertEquals("cf1", new String(p2.getSecond().getFamily()));
-        assertEquals("item_count", new String(p2.getSecond().getQualifier()));
-        assertEquals("2", new String(p2.getSecond().getValue()));
+        assertEquals("cf1", new String(p2.getSecond().getFamily(), StandardCharsets.UTF_8));
+        assertEquals("item_count", new String(p2.getSecond().getQualifier(), StandardCharsets.UTF_8));
+        assertEquals("2", new String(p2.getSecond().getValue(), StandardCharsets.UTF_8));
     }
 }

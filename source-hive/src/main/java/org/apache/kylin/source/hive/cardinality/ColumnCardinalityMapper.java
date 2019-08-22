@@ -37,7 +37,7 @@ import org.apache.kylin.engine.mr.common.AbstractHadoopJob;
 import org.apache.kylin.engine.mr.common.BatchConstants;
 import org.apache.kylin.measure.BufferedMeasureCodec;
 import org.apache.kylin.measure.hllc.HLLCounter;
-import org.apache.kylin.metadata.MetadataManager;
+import org.apache.kylin.metadata.TableMetadataManager;
 import org.apache.kylin.metadata.model.ColumnDesc;
 import org.apache.kylin.metadata.model.TableDesc;
 
@@ -56,15 +56,15 @@ public class ColumnCardinalityMapper<T> extends KylinMapper<T, Object, IntWritab
     private IMRTableInputFormat tableInputFormat;
 
     @Override
-    protected void setup(Context context) throws IOException {
+    protected void doSetup(Context context) throws IOException {
         Configuration conf = context.getConfiguration();
         bindCurrentConfiguration(conf);
         KylinConfig config = AbstractHadoopJob.loadKylinPropsAndMetadata();
 
         String project = conf.get(BatchConstants.CFG_PROJECT_NAME);
         String tableName = conf.get(BatchConstants.CFG_TABLE_NAME);
-        tableDesc = MetadataManager.getInstance(config).getTableDesc(tableName, project);
-        tableInputFormat = MRUtil.getTableInputFormat(tableDesc);
+        tableDesc = TableMetadataManager.getInstance(config).getTableDesc(tableName, project);
+        tableInputFormat = MRUtil.getTableInputFormat(tableDesc, conf.get(BatchConstants.ARG_CUBING_JOB_ID));
     }
 
     @Override

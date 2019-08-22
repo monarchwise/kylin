@@ -47,8 +47,7 @@ fi
 hadoop ${hadoop_conf_param} fs -put * ${hdfs_tmp_dir}/sample_cube/data/
 
 hive_client_mode=`bash ${KYLIN_HOME}/bin/get-properties.sh kylin.source.hive.client`
-sample_database=`bash ${KYLIN_HOME}/bin/get-properties.sh kylin.source.hive.database-for-flat-table`
-sample_database=${sample_database^^}
+sample_database=`bash ${KYLIN_HOME}/bin/get-properties.sh kylin.source.hive.database-for-flat-table | tr [a-z] [A-Z]`
 echo "Going to create sample tables in hive to database "$sample_database" by "$hive_client_mode
 
 if [ "${hive_client_mode}" == "beeline" ]
@@ -88,10 +87,21 @@ cp -rf ${KYLIN_HOME}/sample_cube/template/* ${KYLIN_HOME}/sample_cube/metadata
 
 sed -i "s/%default_storage_type%/${default_storage_type}/g" ${KYLIN_HOME}/sample_cube/metadata/cube_desc/kylin_sales_cube.json
 sed -i "s/%default_engine_type%/${default_engine_type}/g" ${KYLIN_HOME}/sample_cube/metadata/cube_desc/kylin_sales_cube.json
+sed -i "s/%default_storage_type%/${default_storage_type}/g" ${KYLIN_HOME}/sample_cube/metadata/cube_desc/kylin_streaming_cube.json
+sed -i "s/%default_engine_type%/${default_engine_type}/g" ${KYLIN_HOME}/sample_cube/metadata/cube_desc/kylin_streaming_cube.json
+
+#### Add version info into cubes
+kylin_version_str=`bash ${KYLIN_HOME}/bin/kylin.sh version | grep kylin.version`
+kylin_version=${kylin_version_str#*:}
+echo "kylin version is "$kylin_version
+sed -i "s/%default_version%/${kylin_version}/g" ${KYLIN_HOME}/sample_cube/metadata/cube_desc/kylin_sales_cube.json
+sed -i "s/%default_version%/${kylin_version}/g" ${KYLIN_HOME}/sample_cube/metadata/cube_desc/kylin_streaming_cube.json
 
 #### Replace the 'DEFAULT' with kylin.source.hive.database-for-flat-table
 sed -i "s/DEFAULT./$sample_database./g" ${KYLIN_HOME}/sample_cube/metadata/cube_desc/kylin_sales_cube.json
+sed -i "s/DEFAULT./$sample_database./g" ${KYLIN_HOME}/sample_cube/metadata/cube_desc/kylin_streaming_cube.json
 sed -i "s/DEFAULT./$sample_database./g" ${KYLIN_HOME}/sample_cube/metadata/model_desc/kylin_sales_model.json
+sed -i "s/DEFAULT./$sample_database./g" ${KYLIN_HOME}/sample_cube/metadata/model_desc/kylin_streaming_model.json
 sed -i "s/DEFAULT./$sample_database./g" ${KYLIN_HOME}/sample_cube/metadata/project/learn_kylin.json
 sed -i "s/DEFAULT/$sample_database/g" ${KYLIN_HOME}/sample_cube/metadata/table/*.json
 cd ${KYLIN_HOME}/sample_cube/metadata/table

@@ -22,6 +22,8 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -31,9 +33,11 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
@@ -43,21 +47,25 @@ import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
+import org.apache.commons.validator.routines.EmailValidator;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.KylinConfigExt;
 import org.apache.kylin.common.KylinVersion;
+import org.apache.kylin.common.persistence.JsonSerializer;
 import org.apache.kylin.common.persistence.ResourceStore;
 import org.apache.kylin.common.persistence.RootPersistentEntity;
 import org.apache.kylin.common.util.Array;
 import org.apache.kylin.common.util.JsonUtil;
 import org.apache.kylin.common.util.Pair;
 import org.apache.kylin.cube.cuboid.CuboidScheduler;
+import org.apache.kylin.dict.GlobalDictionaryBuilder;
+import org.apache.kylin.dict.global.SegmentAppendTrieDictBuilder;
 import org.apache.kylin.measure.MeasureType;
 import org.apache.kylin.measure.extendedcolumn.ExtendedColumnMeasureType;
 import org.apache.kylin.metadata.MetadataConstants;
-import org.apache.kylin.metadata.MetadataManager;
 import org.apache.kylin.metadata.model.ColumnDesc;
 import org.apache.kylin.metadata.model.DataModelDesc;
+import org.apache.kylin.metadata.model.DataModelManager;
 import org.apache.kylin.metadata.model.FunctionDesc;
 import org.apache.kylin.metadata.model.IEngineAware;
 import org.apache.kylin.metadata.model.IStorageAware;
@@ -77,6 +85,7 @@ import com.fasterxml.jackson.annotation.JsonAutoDetect.Visibility;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.google.common.base.Joiner;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -89,11 +98,18 @@ import com.google.common.collect.Sets;
 public class CubeDesc extends RootPersistentEntity implements IEngineAware {
     private static final Logger logger = LoggerFactory.getLogger(CubeDesc.class);
 
+    // Use with care! Normally you should go to CubeDescManager and don't need this.
+    public static JsonSerializer<CubeDesc> newSerializerForLowLevelAccess() {
+        return new JsonSerializer<>(CubeDesc.class);
+    }
+
     public static class CannotFilterExtendedColumnException extends RuntimeException {
         public CannotFilterExtendedColumnException(TblColRef tblColRef) {
             super(tblColRef == null ? "null" : tblColRef.getCanonicalName());
         }
     }
+
+    public static final int MAX_ROWKEY_SIZE = 64;
 
     public enum DeriveType implements java.io.Serializable {
         LOOKUP, PK_FK, EXTENDED_COLUMN
@@ -119,6 +135,8 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         }
 
     }
+
+    // ============================================================================
 
     private KylinConfigExt config;
     private DataModelDesc model;
@@ -159,23 +177,16 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
     private long partitionDateEnd = 3153600000000L;
     @JsonProperty("auto_merge_time_ranges")
     private long[] autoMergeTimeRanges;
+    @JsonProperty("volatile_range")
+    private long volatileRange = 0;
     @JsonProperty("retention_range")
     private long retentionRange = 0;
     @JsonProperty("engine_type")
-    private int engineType = IEngineAware.ID_MR_V1;
+    private int engineType = IEngineAware.ID_MR_V2;
     @JsonProperty("storage_type")
-    private int storageType = IStorageAware.ID_HBASE;
+    private int storageType = IStorageAware.ID_SHARDED_HBASE;
     @JsonProperty("override_kylin_properties")
     private LinkedHashMap<String, String> overrideKylinProps = new LinkedHashMap<String, String>();
-
-    private LinkedHashSet<TblColRef> allColumns = new LinkedHashSet<>();
-    private LinkedHashSet<ColumnDesc> allColumnDescs = new LinkedHashSet<>();
-    private LinkedHashSet<TblColRef> dimensionColumns = new LinkedHashSet<>();
-
-    private Map<TblColRef, DeriveInfo> derivedToHostMap = Maps.newHashMap();
-    private Map<Array<TblColRef>, List<DeriveInfo>> hostToDerivedMap = Maps.newHashMap();
-
-    private Map<TblColRef, DeriveInfo> extendedColumnToHosts = Maps.newHashMap();
 
     @JsonProperty("partition_offset_start")
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
@@ -189,7 +200,32 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private int parentForward = 3;
 
-    transient private CuboidScheduler cuboidScheduler = null;
+    @JsonProperty("mandatory_dimension_set_list")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private List<Set<String>> mandatoryDimensionSetList = Collections.emptyList();
+
+    // Error messages during resolving json metadata
+    private List<String> errors = new ArrayList<String>();
+
+    @JsonProperty("snapshot_table_desc_list")
+    private List<SnapshotTableDesc> snapshotTableDescList = Collections.emptyList();
+
+    private LinkedHashSet<TblColRef> allColumns = new LinkedHashSet<>();
+    private LinkedHashSet<ColumnDesc> allColumnDescs = new LinkedHashSet<>();
+    private LinkedHashSet<TblColRef> dimensionColumns = new LinkedHashSet<>();
+    private Set<Long> mandatoryCuboids = new HashSet<>();
+
+    private Map<TblColRef, DeriveInfo> derivedToHostMap = Maps.newHashMap();
+    private Map<Array<TblColRef>, List<DeriveInfo>> hostToDerivedMap = Maps.newHashMap();
+
+    private Map<TblColRef, DeriveInfo> extendedColumnToHosts = Maps.newHashMap();
+
+    transient volatile private CuboidScheduler cuboidScheduler = null;
+
+    @Override
+    public String resourceName() {
+        return name;
+    }
 
     public boolean isEnableSharding() {
         //in the future may extend to other storage that is shard-able
@@ -199,11 +235,6 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
     public Set<TblColRef> getShardByColumns() {
         return getRowkey().getShardByColumns();
     }
-
-    /**
-     * Error messages during resolving json metadata
-     */
-    private List<String> errors = new ArrayList<String>();
 
     /**
      * @return all columns this cube can support, including derived
@@ -258,7 +289,7 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
     }
 
     public DimensionDesc findDimensionByTable(String lookupTableName) {
-        lookupTableName = lookupTableName.toUpperCase();
+        lookupTableName = lookupTableName.toUpperCase(Locale.ROOT);
         for (DimensionDesc dim : dimensions)
             if (dim.getTableRef() != null && dim.getTableRef().getTableIdentity().equals(lookupTableName))
                 return dim;
@@ -308,7 +339,7 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
     }
 
     public String getResourcePath() {
-        return concatResourcePath(name);
+        return concatResourcePath(resourceName());
     }
 
     public static String concatResourcePath(String descName) {
@@ -441,6 +472,18 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         this.overrideKylinProps = overrideKylinProps;
     }
 
+    public List<Set<String>> getMandatoryDimensionSetList() {
+        return mandatoryDimensionSetList;
+    }
+
+    public void setMandatoryDimensionSetList(List<Set<String>> mandatoryDimensionSetList) {
+        this.mandatoryDimensionSetList = mandatoryDimensionSetList;
+    }
+
+    public Set<Long> getMandatoryCuboids() {
+        return mandatoryCuboids;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o)
@@ -457,14 +500,6 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
             return false;
 
         return true;
-    }
-
-    /**
-     * Get cuboid level count except base cuboid
-     * @return
-     */
-    public int getBuildLevel() {
-        return getCuboidScheduler().getCuboidsByLayer().size() - 1;
     }
 
     @Override
@@ -537,13 +572,19 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
                     .append(JsonUtil.writeValueAsString(this.rowkey)).append("|")//
                     .append(JsonUtil.writeValueAsString(this.aggregationGroups)).append("|")//
                     .append(JsonUtil.writeValueAsString(this.hbaseMapping)).append("|")//
-                    .append(JsonUtil.writeValueAsString(this.engineType)).append("|")//
                     .append(JsonUtil.writeValueAsString(this.storageType)).append("|");
 
-            String signatureInput = sigString.toString().replaceAll("\\s+", "").toLowerCase();
+            if (mandatoryDimensionSetList != null && !mandatoryDimensionSetList.isEmpty()) {
+                for (Set<String> mandatoryDimensionSet : mandatoryDimensionSetList) {
+                    TreeSet<String> sortedSet = Sets.newTreeSet(mandatoryDimensionSet);
+                    sigString.append(JsonUtil.writeValueAsString(sortedSet)).append("|");
+                }
+            }
 
-            byte[] signature = md.digest(signatureInput.getBytes());
-            String ret = new String(Base64.encodeBase64(signature));
+            String signatureInput = sigString.toString().replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+
+            byte[] signature = md.digest(signatureInput.getBytes(StandardCharsets.UTF_8));
+            String ret = new String(Base64.encodeBase64(signature), StandardCharsets.UTF_8);
             return ret;
         } catch (NoSuchAlgorithmException | JsonProcessingException e) {
             throw new RuntimeException("Failed to calculate signature");
@@ -573,18 +614,24 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         List<ProjectInstance> ownerPrj = ProjectManager.getInstance(config).findProjects(RealizationType.CUBE, name);
 
         // cube inherit the project override props
+        LinkedHashMap<String, String> allOverrideProps = Maps.newLinkedHashMap(overrideKylinProps);
+
         if (ownerPrj.size() == 1) {
             Map<String, String> prjOverrideProps = ownerPrj.get(0).getOverrideKylinProps();
             for (Entry<String, String> entry : prjOverrideProps.entrySet()) {
                 if (!overrideKylinProps.containsKey(entry.getKey())) {
-                    overrideKylinProps.put(entry.getKey(), entry.getValue());
+                    allOverrideProps.put(entry.getKey(), entry.getValue());
                 }
             }
         }
 
-        this.config = KylinConfigExt.createInstance(config, overrideKylinProps);
+        this.config = KylinConfigExt.createInstance(config, allOverrideProps);
 
-        this.model = MetadataManager.getInstance(config).getDataModelDesc(modelName);
+        checkArgument(this.rowkey.getRowKeyColumns().length <= this.config.getCubeRowkeyMaxSize(),
+                "Too many rowkeys (%s) in CubeDesc, please try to reduce dimension number or adopt derived dimensions",
+                this.rowkey.getRowKeyColumns().length);
+
+        this.model = DataModelManager.getInstance(config).getDataModelDesc(modelName);
         checkNotNull(this.model, "DateModelDesc(%s) not found", modelName);
 
         for (DimensionDesc dim : dimensions) {
@@ -602,11 +649,25 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         validateAggregationGroups(); // check if aggregation group is valid
         validateAggregationGroupsCombination();
 
-        if (hbaseMapping != null) {
-            hbaseMapping.init(this);
-        }
+        String hbaseMappingAdapterName = config.getHBaseMappingAdapter();
 
-        initMeasureReferenceToColumnFamily();
+        if (hbaseMappingAdapterName != null) {
+            try {
+                Class<?> hbaseMappingAdapterClass = Class.forName(hbaseMappingAdapterName);
+                Method initMethod = hbaseMappingAdapterClass.getMethod("initHBaseMapping", CubeDesc.class);
+                initMethod.invoke(null, this);
+                Method initMeasureReferenceToColumnFamilyMethod = hbaseMappingAdapterClass
+                        .getMethod("initMeasureReferenceToColumnFamilyWithChecking", CubeDesc.class);
+                initMeasureReferenceToColumnFamilyMethod.invoke(null, this);
+            } catch (Exception e) {
+                throw new RuntimeException("Error during adapting hbase mapping", e);
+            }
+        } else {
+            if (hbaseMapping != null) {
+                hbaseMapping.init(this);
+                initMeasureReferenceToColumnFamily();
+            }
+        }
 
         // check all dimension columns are presented on rowkey
         List<TblColRef> dimCols = listDimensionColumnsExcludingDerived(true);
@@ -616,9 +677,42 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
 
         initDictionaryDesc();
         amendAllColumns();
+
+        // initialize mandatory cuboids based on mandatoryDimensionSetList
+        initMandatoryCuboids();
     }
 
-    public CuboidScheduler getCuboidScheduler() {
+    private void initMandatoryCuboids() {
+        this.mandatoryCuboids.clear();
+        this.mandatoryCuboids.addAll(generateMandatoryCuboids(this.mandatoryDimensionSetList));
+    }
+
+    public Set<Long> generateMandatoryCuboids(List<Set<String>> mandatoryDimensionSetList) {
+        Map<String, RowKeyColDesc> rowKeyColDescMap = Maps.newHashMap();
+        for (RowKeyColDesc entry : getRowkey().getRowKeyColumns()) {
+            rowKeyColDescMap.put(entry.getColumn(), entry);
+        }
+
+        Set<Long> mandatoryCuboids = Sets.newHashSetWithExpectedSize(mandatoryDimensionSetList.size());
+        for (Set<String> mandatoryDimensionSet : mandatoryDimensionSetList) {
+            long cuboid = 0L;
+            for (String columnName : mandatoryDimensionSet) {
+                TblColRef tblColRef = model.findColumn(columnName);
+                RowKeyColDesc rowKeyColDesc = rowKeyColDescMap.get(tblColRef.getIdentity());
+                // check if mandatory dimension set list is valid
+                if (rowKeyColDesc == null) {
+                    logger.warn("Column " + columnName + " in " + mandatoryDimensionSet + " does not exist");
+                    throw new IllegalStateException(
+                            "Column " + columnName + " in " + mandatoryDimensionSet + " does not exist");
+                }
+                cuboid |= 1L << rowKeyColDesc.getBitIndex();
+            }
+            mandatoryCuboids.add(cuboid);
+        }
+        return mandatoryCuboids;
+    }
+
+    public CuboidScheduler getInitialCuboidScheduler() {
         if (cuboidScheduler != null)
             return cuboidScheduler;
 
@@ -635,7 +729,7 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
     }
 
     public void validateAggregationGroupsCombination() {
-        int index = 0;
+        int index = 1;
 
         for (AggregationGroup agg : getAggregationGroups()) {
             try {
@@ -647,8 +741,8 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
                             + ". Use 'mandatory'/'hierarchy'/'joint' to optimize; or update 'kylin.cube.aggrgroup.max-combination' to a bigger value.";
                     throw new TooManyCuboidException(msg);
                 }
-            } catch (TooManyCuboidException tmce) {
-                throw tmce;
+            } catch (TooManyCuboidException e) {
+                throw e;
             } catch (Exception e) {
                 throw new IllegalStateException("Unknown error while calculating cuboid number for " + //
                         "Aggregation group " + index + " of Cube Desc " + this.name, e);
@@ -660,7 +754,7 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
     }
 
     public void validateAggregationGroups() {
-        int index = 0;
+        int index = 1;
 
         for (AggregationGroup agg : getAggregationGroups()) {
             if (agg.getIncludes() == null) {
@@ -748,6 +842,18 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
             }
 
             index++;
+        }
+    }
+
+    public void validateNotifyList() {
+        List<String> notifyList = getNotifyList();
+        if (notifyList != null && !notifyList.isEmpty()) {
+            EmailValidator emailValidator = EmailValidator.getInstance();
+            for (String email : notifyList) {
+                if (!emailValidator.isValid(email)) {
+                    throw new IllegalArgumentException("Email [" + email + "] is not validation.");
+                }
+            }
         }
     }
 
@@ -963,10 +1069,10 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         }
 
         for (MeasureDesc m : measures) {
-            m.setName(m.getName().toUpperCase());
+            m.setName(m.getName().toUpperCase(Locale.ROOT));
 
             if (m.getDependentMeasureRef() != null) {
-                m.setDependentMeasureRef(m.getDependentMeasureRef().toUpperCase());
+                m.setDependentMeasureRef(m.getDependentMeasureRef().toUpperCase(Locale.ROOT));
             }
 
             FunctionDesc func = m.getFunction();
@@ -987,7 +1093,7 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         extendedColumnToHosts.put(extendedColumn, new DeriveInfo(DeriveType.EXTENDED_COLUMN, null, hostCols, false));
     }
 
-    private void initMeasureReferenceToColumnFamily() {
+    public void initMeasureReferenceToColumnFamily() {
         if (measures == null || measures.size() == 0)
             return;
 
@@ -999,16 +1105,27 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
             measureIndexLookup.put(measures.get(i).getName(), i);
 
         BitSet checkEachMeasureExist = new BitSet();
+        Set<String> measureSet = Sets.newHashSet();
         for (HBaseColumnFamilyDesc cf : getHbaseMapping().getColumnFamily()) {
             for (HBaseColumnDesc c : cf.getColumns()) {
                 String[] colMeasureRefs = c.getMeasureRefs();
                 MeasureDesc[] measureDescs = new MeasureDesc[colMeasureRefs.length];
                 int[] measureIndex = new int[colMeasureRefs.length];
+                int lastMeasureIndex = -1;
                 for (int i = 0; i < colMeasureRefs.length; i++) {
                     measureDescs[i] = measureLookup.get(colMeasureRefs[i]);
                     checkState(measureDescs[i] != null, "measure desc at (%s) is null", i);
                     measureIndex[i] = measureIndexLookup.get(colMeasureRefs[i]);
                     checkState(measureIndex[i] >= 0, "measure index at (%s) not positive", i);
+
+                    checkState(!measureSet.contains(colMeasureRefs[i]), "measure (%s) duplicates", colMeasureRefs[i]);
+                    measureSet.add(colMeasureRefs[i]);
+
+                    if (storageType > IStorageAware.ID_SHARDED_HBASE) {
+                        checkState(measureIndex[i] > lastMeasureIndex, "measure (%s) is not in order",
+                                colMeasureRefs[i]);
+                        lastMeasureIndex = measureIndex[i];
+                    }
 
                     checkEachMeasureExist.set(measureIndex[i]);
                 }
@@ -1020,8 +1137,9 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
 
         for (int i = 0; i < measures.size(); i++) {
             checkState(checkEachMeasureExist.get(i),
-                    "measure (%s) does not exist in column family，or measure duplicates", measures.get(i));
+                    "measure (%s) does not exist in column family, or measure duplicates", measures.get(i));
         }
+
     }
 
     private void initDictionaryDesc() {
@@ -1079,6 +1197,14 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         return result;
     }
 
+    public long getVolatileRange() {
+        return volatileRange;
+    }
+
+    public void setVolatileRange(long volatileRange) {
+        this.volatileRange = volatileRange;
+    }
+
     public long getRetentionRange() {
         return retentionRange;
     }
@@ -1095,20 +1221,16 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         this.autoMergeTimeRanges = autoMergeTimeRanges;
     }
 
+    public boolean isBroken() {
+        return !errors.isEmpty();
+    }
+
     public void addError(String message) {
         this.errors.add(message);
     }
 
-    public List<String> getError() {
-        return this.errors;
-    }
-
-    public String getErrorMsg() {
-        StringBuffer sb = new StringBuffer();
-        for (String error : errors) {
-            sb.append(error + " ");
-        }
-        return sb.toString();
+    public String getErrorsAsString() {
+        return Joiner.on("; ").join(errors);
     }
 
     public HBaseMappingDesc getHbaseMapping() {
@@ -1169,7 +1291,7 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
     }
 
     public Set<Long> getAllCuboids() {
-        return getCuboidScheduler().getAllCuboidIds();
+        return getInitialCuboidScheduler().getAllCuboidIds();
     }
 
     public int getParentForward() {
@@ -1181,18 +1303,28 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
     }
 
     /**
-     * Get columns that have dictionary
+     * Get dimensions that have dictionary
      */
-    public Set<TblColRef> getAllColumnsHaveDictionary() {
-        Set<TblColRef> result = Sets.newLinkedHashSet();
+    public Set<TblColRef> getAllDimsHaveDictionary() {
+        Set<TblColRef> result = Sets.newHashSet();
 
-        // dictionaries in dimensions
         for (RowKeyColDesc rowKeyColDesc : rowkey.getRowKeyColumns()) {
             TblColRef colRef = rowKeyColDesc.getColRef();
             if (rowkey.isUseDictionary(colRef)) {
                 result.add(colRef);
             }
         }
+        return result;
+    }
+
+    /**
+     * Get columns that have dictionary
+     */
+    public Set<TblColRef> getAllColumnsHaveDictionary() {
+        Set<TblColRef> result = Sets.newLinkedHashSet();
+
+        // dictionaries in dimensions
+        result.addAll(getAllDimsHaveDictionary());
 
         // dictionaries in measures
         for (MeasureDesc measure : measures) {
@@ -1205,6 +1337,25 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
             for (DictionaryDesc dictDesc : dictionaries) {
                 TblColRef col = dictDesc.getColumnRef();
                 result.add(col);
+            }
+        }
+
+        //mr - hive global dict
+        if (overrideKylinProps.containsKey("kylin.dictionary.mr-hive.columns")) {
+            String mrHiveDictColumns = overrideKylinProps.get("kylin.dictionary.mr-hive.columns");
+            if (StringUtils.isNotEmpty(mrHiveDictColumns)) {
+                String[] mrHiveDictColumnArr = mrHiveDictColumns.split(",");
+                for (String dictColumn : mrHiveDictColumnArr) {
+                    Iterator<TblColRef> it = result.iterator();
+                    while (it.hasNext()) {
+                        TblColRef colRef = it.next();
+                        String aliasCol = colRef.getTableAlias() + "_" + colRef.getName();
+                        if (aliasCol.equalsIgnoreCase(dictColumn)) {
+                            logger.debug("Remove column {} because it has been built by MR", aliasCol);
+                            it.remove();
+                        }
+                    }
+                }
             }
         }
 
@@ -1257,6 +1408,53 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         return null;
     }
 
+    public List<SnapshotTableDesc> getSnapshotTableDescList() {
+        return snapshotTableDescList;
+    }
+
+    public void setSnapshotTableDescList(List<SnapshotTableDesc> snapshotTableDescList) {
+        this.snapshotTableDescList = snapshotTableDescList;
+    }
+
+    public SnapshotTableDesc getSnapshotTableDesc(String tableName) {
+        for (SnapshotTableDesc snapshotTableDesc : snapshotTableDescList) {
+            if (snapshotTableDesc.getTableName().equalsIgnoreCase(tableName)) {
+                return snapshotTableDesc;
+            }
+        }
+        return null;
+    }
+
+    public boolean isGlobalSnapshotTable(String tableName) {
+        SnapshotTableDesc desc = getSnapshotTableDesc(tableName);
+        if (desc == null) {
+            return false;
+        }
+        return desc.isGlobal();
+    }
+
+    public boolean isExtSnapshotTable(String tableName) {
+        SnapshotTableDesc desc = getSnapshotTableDesc(tableName);
+        if (desc == null) {
+            return false;
+        }
+        return desc.isExtSnapshotTable();
+    }
+
+    public List<String> getAllExtLookupSnapshotTypes() {
+        List<String> result = Lists.newArrayList();
+        for (SnapshotTableDesc snapshotTableDesc : snapshotTableDescList) {
+            if (snapshotTableDesc.isExtSnapshotTable()) {
+                result.add(snapshotTableDesc.getStorageType());
+            }
+        }
+        return result;
+    }
+
+    public boolean isStreamingCube() {
+        return getModel().getRootFactTable().getTableDesc().isStreamingTable();
+    }
+
     /** Get a column which can be used to cluster the source table.
      * To reduce memory footprint in base cuboid for global dict */
     // TODO handle more than one ultra high cardinality columns use global dict in one cube
@@ -1294,8 +1492,57 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         return null;
     }
 
+    public List<TblColRef> getAllGlobalDictColumns() {
+        List<TblColRef> globalDictCols = new ArrayList<TblColRef>();
+        List<DictionaryDesc> dictionaryDescList = getDictionaries();
+
+        if (dictionaryDescList == null) {
+            return globalDictCols;
+        }
+
+        for (DictionaryDesc dictionaryDesc : dictionaryDescList) {
+            String cls = dictionaryDesc.getBuilderClass();
+            if (GlobalDictionaryBuilder.class.getName().equals(cls)
+                    || SegmentAppendTrieDictBuilder.class.getName().equals(cls))
+                globalDictCols.add(dictionaryDesc.getColumnRef());
+        }
+        return globalDictCols;
+    }
+
+    public boolean isShrunkenDictFromGlobalEnabled() {
+        boolean needShrunkenDict = config.isShrunkenDictFromGlobalEnabled() && !getAllGlobalDictColumns().isEmpty();
+        boolean needMrHiveDict = config.getMrHiveDictColumns().length > 0;
+        if (needMrHiveDict && needShrunkenDict) {
+            logger.info("ShrunkenDict cannot work with MrHiveDict, so shutdown ShrunkenDict.");
+            return false;
+        } else {
+            return needShrunkenDict;
+        }
+    }
+
+    // UHC (ultra high cardinality column): contain the ShardByColumns and the GlobalDictionaryColumns
+    public List<TblColRef> getAllUHCColumns() {
+        List<TblColRef> uhcColumns = new ArrayList<>();
+        uhcColumns.addAll(getAllGlobalDictColumns());
+        uhcColumns.addAll(getShardByColumns());
+        return uhcColumns;
+    }
+
     public String getProject() {
-        return getModel().getProject();
+        DataModelDesc modelDesc = getModel();
+        if (modelDesc == null) {
+            // In case the model for cube not exists in metadata
+            List<ProjectInstance> ownerPrj = ProjectManager.getInstance(config).findProjects(RealizationType.CUBE,
+                    name);
+
+            if (ownerPrj.size() == 1) {
+                return ownerPrj.get(0).getName();
+            } else {
+                throw new IllegalStateException("No project found for cube " + name);
+            }
+        } else {
+            return getModel().getProject();
+        }
     }
 
     public static CubeDesc getCopyOf(CubeDesc cubeDesc) {
@@ -1316,6 +1563,7 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         newCubeDesc.setAutoMergeTimeRanges(cubeDesc.getAutoMergeTimeRanges());
         newCubeDesc.setPartitionDateStart(cubeDesc.getPartitionDateStart());
         newCubeDesc.setPartitionDateEnd(cubeDesc.getPartitionDateEnd());
+        newCubeDesc.setVolatileRange(cubeDesc.getVolatileRange());
         newCubeDesc.setRetentionRange(cubeDesc.getRetentionRange());
         newCubeDesc.setEngineType(cubeDesc.getEngineType());
         newCubeDesc.setStorageType(cubeDesc.getStorageType());
@@ -1325,6 +1573,8 @@ public class CubeDesc extends RootPersistentEntity implements IEngineAware {
         newCubeDesc.setPartitionOffsetStart(cubeDesc.getPartitionOffsetStart());
         newCubeDesc.setVersion(cubeDesc.getVersion());
         newCubeDesc.setParentForward(cubeDesc.getParentForward());
+        newCubeDesc.setSnapshotTableDescList(cubeDesc.getSnapshotTableDescList());
+        newCubeDesc.setMandatoryDimensionSetList(cubeDesc.getMandatoryDimensionSetList());
         newCubeDesc.updateRandomUuid();
         return newCubeDesc;
     }

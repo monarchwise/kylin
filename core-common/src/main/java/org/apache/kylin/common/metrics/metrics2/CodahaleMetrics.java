@@ -24,6 +24,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -38,6 +39,7 @@ import org.apache.kylin.common.metrics.common.Metrics;
 import org.apache.kylin.common.metrics.common.MetricsConstant;
 import org.apache.kylin.common.metrics.common.MetricsScope;
 import org.apache.kylin.common.metrics.common.MetricsVariable;
+import org.apache.kylin.common.threadlocal.InternalThreadLocal;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -74,7 +76,7 @@ public class CodahaleMetrics implements Metrics {
     private final Lock metersLock = new ReentrantLock();
     private final Lock histogramLock = new ReentrantLock();
     private final Set<Closeable> reporters = new HashSet<Closeable>();
-    private final ThreadLocal<HashMap<String, CodahaleMetricsScope>> threadLocalScopes = new ThreadLocal<HashMap<String, CodahaleMetricsScope>>() {
+    private final InternalThreadLocal<HashMap<String, CodahaleMetricsScope>> threadLocalScopes = new InternalThreadLocal<HashMap<String, CodahaleMetricsScope>>() {
         @Override
         protected HashMap<String, CodahaleMetricsScope> initialValue() {
             return new HashMap<String, CodahaleMetricsScope>();
@@ -144,9 +146,27 @@ public class CodahaleMetrics implements Metrics {
         for (Map.Entry<String, Metric> metric : metricRegistry.getMetrics().entrySet()) {
             metricRegistry.remove(metric.getKey());
         }
-        timers.invalidateAll();
-        counters.invalidateAll();
-        meters.invalidateAll();
+
+        try {
+            timersLock.lock();
+            timers.invalidateAll();
+        } finally {
+            timersLock.unlock();
+        }
+
+        try {
+            countersLock.lock();
+            counters.invalidateAll();
+        } finally {
+            countersLock.unlock();
+        }
+
+        try {
+            metersLock.lock();
+            meters.invalidateAll();
+        } finally {
+            metersLock.unlock();
+        }
     }
 
     @Override
@@ -387,7 +407,7 @@ public class CodahaleMetrics implements Metrics {
     private boolean initCodahaleMetricsReporterClasses() {
 
         List<String> reporterClasses = Lists.newArrayList(Splitter.on(",").trimResults().omitEmptyStrings()
-                .split(KylinConfig.getInstanceFromEnv().getCoadhaleMetricReportClassesName()));
+                .split(KylinConfig.getInstanceFromEnv().getCoadhaleMetricsReportClassesNames()));
         if (reporterClasses.isEmpty()) {
             return false;
         }
@@ -424,7 +444,7 @@ public class CodahaleMetrics implements Metrics {
     private boolean initMetricsReporter() {
 
         List<String> metricsReporterNames = Lists.newArrayList(Splitter.on(",").trimResults().omitEmptyStrings()
-                .split(KylinConfig.getInstanceFromEnv().getCoadhaleMetricReportClassesName()));
+                .split(KylinConfig.getInstanceFromEnv().getCoadhaleMetricsReportClassesNames()));
         if (metricsReporterNames.isEmpty()) {
             return false;
         }
@@ -432,7 +452,7 @@ public class CodahaleMetrics implements Metrics {
         MetricsReporting reporter = null;
         for (String metricsReportingName : metricsReporterNames) {
             try {
-                reporter = MetricsReporting.valueOf(metricsReportingName.trim().toUpperCase());
+                reporter = MetricsReporting.valueOf(metricsReportingName.trim().toUpperCase(Locale.ROOT));
             } catch (IllegalArgumentException e) {
                 LOGGER.error("Invalid reporter name " + metricsReportingName, e);
                 throw e;

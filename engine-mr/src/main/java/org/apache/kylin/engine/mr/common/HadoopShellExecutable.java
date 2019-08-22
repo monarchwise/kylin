@@ -22,8 +22,9 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.reflect.Constructor;
 
-import org.apache.hadoop.util.ToolRunner;
 import org.apache.kylin.common.util.ClassUtil;
+import org.apache.kylin.engine.mr.MRUtil;
+import org.apache.kylin.engine.mr.exception.HadoopShellException;
 import org.apache.kylin.job.exception.ExecuteException;
 import org.apache.kylin.job.execution.AbstractExecutable;
 import org.apache.kylin.job.execution.ExecutableContext;
@@ -59,7 +60,7 @@ public class HadoopShellExecutable extends AbstractExecutable {
             int result;
             StringBuilder log = new StringBuilder();
             try {
-                result = ToolRunner.run(job, args);
+                result = MRUtil.runMRJob(job, args);
             } catch (Exception ex) {
                 logger.error("error execute " + this.toString(), ex);
                 StringWriter stringWriter = new StringWriter();
@@ -68,13 +69,14 @@ public class HadoopShellExecutable extends AbstractExecutable {
                 result = 2;
             }
             log.append("result code:").append(result);
-            return result == 0 ? new ExecuteResult(ExecuteResult.State.SUCCEED, log.toString()) : new ExecuteResult(ExecuteResult.State.FAILED, log.toString());
+            return result == 0 ? new ExecuteResult(ExecuteResult.State.SUCCEED, log.toString())
+                    : ExecuteResult.createFailed(new HadoopShellException(log.toString()));
         } catch (ReflectiveOperationException e) {
             logger.error("error getMapReduceJobClass, class name:" + getParam(KEY_MR_JOB), e);
-            return new ExecuteResult(ExecuteResult.State.ERROR, e.getLocalizedMessage());
+            return ExecuteResult.createError(e);
         } catch (Exception e) {
             logger.error("error execute " + this.toString(), e);
-            return new ExecuteResult(ExecuteResult.State.ERROR, e.getLocalizedMessage());
+            return ExecuteResult.createError(e);
         }
     }
 

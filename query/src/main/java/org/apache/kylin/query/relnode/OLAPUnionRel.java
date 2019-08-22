@@ -23,7 +23,6 @@ import java.util.List;
 
 import org.apache.calcite.adapter.enumerable.EnumerableConvention;
 import org.apache.calcite.adapter.enumerable.EnumerableRel;
-import org.apache.calcite.adapter.enumerable.EnumerableUnion;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptCost;
 import org.apache.calcite.plan.RelOptPlanner;
@@ -34,16 +33,20 @@ import org.apache.calcite.rel.RelWriter;
 import org.apache.calcite.rel.core.SetOp;
 import org.apache.calcite.rel.core.Union;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
+import org.apache.kylin.metadata.expression.ColumnTupleExpression;
+import org.apache.kylin.metadata.expression.RexCallTupleExpression;
+import org.apache.kylin.metadata.expression.TupleExpression;
+import org.apache.kylin.metadata.model.TblColRef;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
 
 /**
  */
 public class OLAPUnionRel extends Union implements OLAPRel {
 
-    private final boolean localAll; // avoid same name in parent class
-    private ColumnRowType columnRowType;
-    private OLAPContext context;
+    ColumnRowType columnRowType;
+    OLAPContext context;
 
     public OLAPUnionRel(RelOptCluster cluster, RelTraitSet traitSet, List<RelNode> inputs, boolean all) {
         super(cluster, traitSet, inputs, all);
@@ -51,7 +54,6 @@ public class OLAPUnionRel extends Union implements OLAPRel {
         for (RelNode child : inputs) {
             Preconditions.checkArgument(getConvention() == child.getConvention());
         }
-        this.localAll = all;
     }
 
     @Override
@@ -66,25 +68,52 @@ public class OLAPUnionRel extends Union implements OLAPRel {
 
     @Override
     public RelWriter explainTerms(RelWriter pw) {
-        return super.explainTerms(pw).itemIf("all", all, true);
-    }
+        boolean contextNotNull = context != null;
 
+        return super.explainTerms(pw)
+                .item("ctx", context == null ? "" : String.valueOf(context.id) + "@" + context.realization)
+                .itemIf("all", all, true);
+    }
     @Override
     public void implementOLAP(OLAPImplementor implementor) {
+        // Always create new OlapContext to combine columns from all children contexts.
+        implementor.allocateContext();
+        this.context = implementor.getContext();
         for (int i = 0, n = getInputs().size(); i < n; i++) {
             implementor.fixSharedOlapTableScanAt(this, i);
             implementor.visitChild(getInputs().get(i), this);
+            if (implementor.getContext() != this.context) {
+                implementor.freeContext();
+            }
         }
 
         this.columnRowType = buildColumnRowType();
-        this.context = implementor.getContext();
     }
 
+    /**
+     * Fake ColumnRowType for Union, all the columns are inner columns.
+     */
     private ColumnRowType buildColumnRowType() {
-        // TODO just hack for now
-        OLAPRel olapChild = (OLAPRel) getInput(0);
-        ColumnRowType inputColumnRowType = olapChild.getColumnRowType();
-        return inputColumnRowType;
+        ColumnRowType inputColumnRowType = ((OLAPRel) getInput(0)).getColumnRowType();
+        List<TblColRef> columns = Lists.newArrayList();
+        List<TupleExpression> sourceColumns = Lists.newArrayList();
+
+        for (TblColRef tblColRef : inputColumnRowType.getAllColumns()) {
+            columns.add(TblColRef.newInnerColumn(tblColRef.getName(), TblColRef.InnerDataTypeEnum.LITERAL));
+        }
+
+        for (RelNode child : getInputs()) {
+            OLAPRel olapChild = (OLAPRel) child;
+            List<TblColRef> innerCols = olapChild.getColumnRowType().getAllColumns();
+            List<TupleExpression> children = Lists.newArrayListWithExpectedSize(innerCols.size());
+            for (TblColRef innerCol : innerCols) {
+                children.add(new ColumnTupleExpression(innerCol));
+            }
+            sourceColumns.add(new RexCallTupleExpression(children));
+        }
+
+        ColumnRowType fackColumnRowType = new ColumnRowType(columns, sourceColumns);
+        return fackColumnRowType;
     }
 
     @Override
@@ -106,7 +135,7 @@ public class OLAPUnionRel extends Union implements OLAPRel {
             }
             relInputs.add(input);
         }
-        return new EnumerableUnion(getCluster(), traitSet, relInputs, localAll);
+        return new KylinEnumerableUnion(getCluster(), traitSet.replace(EnumerableConvention.INSTANCE), relInputs, all);
     }
 
     @Override
@@ -122,7 +151,7 @@ public class OLAPUnionRel extends Union implements OLAPRel {
     @Override
     public boolean hasSubQuery() {
         for (RelNode child : getInputs()) {
-            if (((OLAPRel)child).hasSubQuery()) {
+            if (((OLAPRel) child).hasSubQuery()) {
                 return true;
             }
         }

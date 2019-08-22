@@ -20,6 +20,7 @@ package org.apache.kylin.metadata.model;
 
 import java.io.Serializable;
 
+import java.util.Locale;
 import org.apache.kylin.metadata.datatype.DataType;
 
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
@@ -57,16 +58,18 @@ public class ColumnDesc implements Serializable {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String index;
 
+    @JsonProperty("cc_expr")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String computedColumnExpr = null;//if null, it's not a computed column
+
     // parsed from data type
     private DataType type;
-    private DataType upgradedType;
 
     private TableDesc table;
     private int zeroBasedIndex = -1;
     private boolean isNullable = true;
 
     private TblColRef ref;
-    private String computedColumnExpr = null;//if null, it's not a computed column
 
     public ColumnDesc() { // default constructor for Jackson
     }
@@ -79,6 +82,7 @@ public class ColumnDesc implements Serializable {
         this.comment = other.comment;
         this.dataGen = other.dataGen;
         this.index = other.index;
+        this.computedColumnExpr = other.computedColumnExpr;
     }
 
     public ColumnDesc(String id, String name, String datatype, String comment, String dataGen, String index,
@@ -115,16 +119,8 @@ public class ColumnDesc implements Serializable {
         type = DataType.getType(datatype);
     }
 
-    public void setUpgradedType(String datatype) {
-        this.upgradedType = DataType.getType(datatype);
-    }
-
     public DataType getUpgradedType() {
-        if (this.upgradedType == null) {
-            return this.type;
-        } else {
-            return this.upgradedType;
-        }
+        return this.type;
     }
 
     public String getId() {
@@ -193,14 +189,13 @@ public class ColumnDesc implements Serializable {
         return index;
     }
 
-    public String getComputedColumnExpr(String tableAlias) {
+    public String getComputedColumnExpr() {
         Preconditions.checkState(computedColumnExpr != null);
-        Preconditions.checkState(tableAlias != null);
 
         return computedColumnExpr;
     }
 
-    public boolean isComputedColumnn() {
+    public boolean isComputedColumn() {
         return computedColumnExpr != null;
     }
 
@@ -208,7 +203,7 @@ public class ColumnDesc implements Serializable {
         this.table = table;
 
         if (name != null)
-            name = name.toUpperCase();
+            name = name.toUpperCase(Locale.ROOT);
 
         if (id != null)
             zeroBasedIndex = Integer.parseInt(id) - 1;

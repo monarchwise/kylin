@@ -18,146 +18,28 @@
 
 package org.apache.kylin.rest.service;
 
+import org.apache.kylin.rest.security.ManagedUser;
+import org.springframework.security.provisioning.UserDetailsManager;
+
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.List;
 
-import javax.annotation.PostConstruct;
+public interface UserService extends UserDetailsManager {
 
-import org.apache.kylin.common.KylinConfig;
-import org.apache.kylin.common.persistence.JsonSerializer;
-import org.apache.kylin.common.persistence.ResourceStore;
-import org.apache.kylin.common.persistence.Serializer;
-import org.apache.kylin.rest.exception.InternalErrorException;
-import org.apache.kylin.rest.msg.Message;
-import org.apache.kylin.rest.msg.MsgPicker;
-import org.apache.kylin.rest.security.ManagedUser;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.security.core.GrantedAuthority;
-import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.core.userdetails.UsernameNotFoundException;
-import org.springframework.security.provisioning.UserDetailsManager;
-import org.springframework.stereotype.Component;
+    boolean isEvictCacheFlag();
 
-import com.google.common.base.Preconditions;
+    void setEvictCacheFlag(boolean evictCacheFlag);
 
-/**
- */
-@Component("userService")
-public class UserService implements UserDetailsManager {
+    List<ManagedUser> listUsers() throws IOException;
 
-    private Logger logger = LoggerFactory.getLogger(UserService.class);
+    List<ManagedUser> listUsers(String userName, Boolean isFuzzyMatch) throws IOException;
 
-    public static final String DIR_PREFIX = "/user/";
+    List<ManagedUser> listUsers(String userName, String groupName, Boolean isFuzzyMatch) throws IOException;
 
-    public static final String SUPER_ADMIN = "ADMIN";
+    List<String> listAdminUsers() throws IOException;
 
-    public static final Serializer<ManagedUser> SERIALIZER = new JsonSerializer<>(ManagedUser.class);
-
-    protected ResourceStore aclStore;
-
-    private boolean evictCacheFlag = false;
-
-    public boolean isEvictCacheFlag() {
-        return evictCacheFlag;
-    }
-
-    public void setEvictCacheFlag(boolean evictCacheFlag) {
-        this.evictCacheFlag = evictCacheFlag;
-    }
-
-    @PostConstruct
-    public void init() throws IOException {
-        aclStore = ResourceStore.getStore(KylinConfig.getInstanceFromEnv());
-    }
-
-    @Override
-    //@PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN) --- DON'T DO THIS, CAUSES CIRCULAR DEPENDENCY BETWEEN UserService & AclService
-    public void createUser(UserDetails user) {
-        updateUser(user);
-    }
-
-    @Override
-    //@PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN) --- DON'T DO THIS, CAUSES CIRCULAR DEPENDENCY BETWEEN UserService & AclService
-    public void updateUser(UserDetails user) {
-        Preconditions.checkState(user instanceof ManagedUser, "User {} is not ManagedUser", user);
-        ManagedUser managedUser = (ManagedUser) user;
-        try {
-            String id = getId(user.getUsername());
-            aclStore.putResourceWithoutCheck(id, managedUser, System.currentTimeMillis(), SERIALIZER);
-            logger.trace("update user : {}", user.getUsername());
-        } catch (IOException e) {
-            throw new InternalErrorException(e);
-        }
-    }
-
-    @Override
-    public void deleteUser(String userName) {
-        if (userName.equals(SUPER_ADMIN))
-            throw new InternalErrorException("User " + userName + " is not allowed to be deleted.");
-
-        try {
-            String id = getId(userName);
-            aclStore.deleteResource(id);
-            logger.trace("delete user : {}", userName);
-        } catch (IOException e) {
-            throw new InternalErrorException(e);
-        }
-    }
-
-    @Override
-    public void changePassword(String oldPassword, String newPassword) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean userExists(String userName) {
-        try {
-            logger.trace("judge user exist: {}", userName);
-            return aclStore.exists(getId(userName));
-        } catch (IOException e) {
-            throw new InternalErrorException(e);
-        }
-    }
-
-    /**
-     * 
-     * @return a ManagedUser
-     */
-    @Override
-    public UserDetails loadUserByUsername(String userName) throws UsernameNotFoundException {
-        Message msg = MsgPicker.getMsg();
-        try {
-            ManagedUser managedUser = aclStore.getResource(getId(userName), ManagedUser.class, SERIALIZER);
-            if (managedUser == null) {
-                throw new UsernameNotFoundException(String.format(msg.getUSER_NOT_FOUND(), userName));
-            }
-            logger.trace("load user : {}", userName);
-            return managedUser;
-        } catch (IOException e) {
-            throw new InternalErrorException(e);
-        }
-    }
-
-    public List<String> listUserAuthorities() throws IOException {
-        List<String> all = new ArrayList<String>();
-        for (UserDetails user : listUsers()) {
-            for (GrantedAuthority auth : user.getAuthorities()) {
-                if (!all.contains(auth.getAuthority())) {
-                    all.add(auth.getAuthority());
-                }
-            }
-        }
-        return all;
-    }
-
-    public List<ManagedUser> listUsers() throws IOException {
-        return aclStore.getAllResources(DIR_PREFIX, ManagedUser.class, SERIALIZER);
-    }
-
-    public static String getId(String userName) {
-        return DIR_PREFIX + userName;
-    }
-
+    //For performance consideration, list all users may be incomplete(eg. not load user's authorities until authorities has benn used).
+    //So it's an extension point that can complete user's information latter.
+    //loadUserByUsername() has guarantee that the return user is complete.
+    void completeUserInfo(ManagedUser user);
 }

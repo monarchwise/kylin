@@ -18,40 +18,33 @@
 
 package org.apache.kylin.rest.service;
 
-import static org.apache.kylin.rest.controller2.ModelControllerV2.VALID_MODELNAME;
-
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
 import org.apache.commons.lang.StringUtils;
-import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.persistence.RootPersistentEntity;
-import org.apache.kylin.common.util.HiveCmdBuilder;
-import org.apache.kylin.common.util.Pair;
 import org.apache.kylin.cube.CubeInstance;
 import org.apache.kylin.cube.model.CubeDesc;
-import org.apache.kylin.job.JoinedFlatTable;
+import org.apache.kylin.metadata.ModifiedOrder;
 import org.apache.kylin.metadata.draft.Draft;
-import org.apache.kylin.metadata.model.ComputedColumnDesc;
 import org.apache.kylin.metadata.model.DataModelDesc;
-import org.apache.kylin.metadata.model.IJoinedFlatTableDesc;
-import org.apache.kylin.metadata.model.ISegment;
+import org.apache.kylin.metadata.model.ISourceAware;
 import org.apache.kylin.metadata.model.JoinsTree;
 import org.apache.kylin.metadata.model.ModelDimensionDesc;
-import org.apache.kylin.metadata.model.SegmentRange;
 import org.apache.kylin.metadata.model.TableDesc;
 import org.apache.kylin.metadata.model.TblColRef;
-import org.apache.kylin.metadata.project.ProjectInstance;
 import org.apache.kylin.rest.exception.BadRequestException;
 import org.apache.kylin.rest.exception.ForbiddenException;
 import org.apache.kylin.rest.msg.Message;
 import org.apache.kylin.rest.msg.MsgPicker;
-import org.apache.kylin.rest.security.AclPermission;
 import org.apache.kylin.rest.util.AclEvaluate;
+import org.apache.kylin.rest.util.ValidateUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -72,39 +65,50 @@ public class ModelService extends BasicService {
     private static final Logger logger = LoggerFactory.getLogger(ModelService.class);
 
     @Autowired
-    @Qualifier("accessService")
-    private AccessService accessService;
-
-    @Autowired
     @Qualifier("cubeMgmtService")
     private CubeService cubeService;
 
     @Autowired
     private AclEvaluate aclEvaluate;
 
+    public boolean isModelNameValidate(final String modelName) {
+        if (StringUtils.isEmpty(modelName) || !ValidateUtil.isAlphanumericUnderscore(modelName)) {
+            return false;
+        }
+        for (DataModelDesc model : getDataModelManager().getModels()) {
+            if (modelName.equalsIgnoreCase(model.getName())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public List<DataModelDesc> listAllModels(final String modelName, final String projectName, boolean exactMatch)
             throws IOException {
         List<DataModelDesc> models;
-        ProjectInstance project = (null != projectName) ? getProjectManager().getProject(projectName) : null;
 
-        if (null == project) {
+        if (null == projectName) {
             aclEvaluate.checkIsGlobalAdmin();
-            models = getMetadataManager().getModels();
+            models = getDataModelManager().getModels();
         } else {
-            aclEvaluate.hasProjectReadPermission(project);
-            models = getMetadataManager().getModels(projectName);
+            aclEvaluate.checkProjectReadPermission(projectName);
+            models = getDataModelManager().getModels(projectName);
         }
 
         List<DataModelDesc> filterModels = new ArrayList<DataModelDesc>();
         for (DataModelDesc modelDesc : models) {
             boolean isModelMatch = (null == modelName) || modelName.length() == 0
-                    || (exactMatch && modelDesc.getName().toLowerCase().equals(modelName.toLowerCase()))
-                    || (!exactMatch && modelDesc.getName().toLowerCase().contains(modelName.toLowerCase()));
+                    || (exactMatch
+                            && modelDesc.getName().toLowerCase(Locale.ROOT).equals(modelName.toLowerCase(Locale.ROOT)))
+                    || (!exactMatch && modelDesc.getName().toLowerCase(Locale.ROOT)
+                            .contains(modelName.toLowerCase(Locale.ROOT)));
 
             if (isModelMatch) {
                 filterModels.add(modelDesc);
             }
         }
+
+        Collections.sort(filterModels, new ModifiedOrder());
 
         return filterModels;
     }
@@ -126,56 +130,56 @@ public class ModelService extends BasicService {
     }
 
     public DataModelDesc createModelDesc(String projectName, DataModelDesc desc) throws IOException {
-        aclEvaluate.hasProjectWritePermission(getProjectManager().getProject(projectName));
+        aclEvaluate.checkProjectWritePermission(projectName);
         Message msg = MsgPicker.getMsg();
-
-        if (getMetadataManager().getDataModelDesc(desc.getName()) != null) {
-            throw new BadRequestException(String.format(msg.getDUPLICATE_MODEL_NAME(), desc.getName()));
+        if (getDataModelManager().getDataModelDesc(desc.getName()) != null) {
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getDUPLICATE_MODEL_NAME(), desc.getName()));
         }
+
+        String factTableName = desc.getRootFactTableName();
+        TableDesc tableDesc = getTableManager().getTableDesc(factTableName, projectName);
+        if (tableDesc.getSourceType() == ISourceAware.ID_STREAMING
+                && (desc.getPartitionDesc() == null || desc.getPartitionDesc().getPartitionDateColumn() == null)) {
+            throw new IllegalArgumentException("Must define a partition column.");
+        }
+
         DataModelDesc createdDesc = null;
         String owner = SecurityContextHolder.getContext().getAuthentication().getName();
-        createdDesc = getMetadataManager().createDataModelDesc(desc, projectName, owner);
-
-        if (!desc.isDraft()) {
-            accessService.init(createdDesc, AclPermission.ADMINISTRATION);
-            ProjectInstance project = getProjectManager().getProject(projectName);
-            accessService.inherit(createdDesc, project);
-        }
+        createdDesc = getDataModelManager().createDataModelDesc(desc, projectName, owner);
         return createdDesc;
     }
 
     public DataModelDesc updateModelAndDesc(String project, DataModelDesc desc) throws IOException {
         aclEvaluate.checkProjectWritePermission(project);
-        getMetadataManager().updateDataModelDesc(desc);
+        getDataModelManager().updateDataModelDesc(desc);
         return desc;
     }
 
     public void dropModel(DataModelDesc desc) throws IOException {
-        aclEvaluate.hasProjectWritePermission(desc.getProjectInstance());
+        aclEvaluate.checkProjectWritePermission(desc.getProjectInstance().getName());
         Message msg = MsgPicker.getMsg();
         //check cube desc exist
         List<CubeDesc> cubeDescs = getCubeDescManager().listAllDesc();
         for (CubeDesc cubeDesc : cubeDescs) {
             if (cubeDesc.getModelName().equals(desc.getName())) {
-                throw new BadRequestException(String.format(msg.getDROP_REFERENCED_MODEL(), cubeDesc.getName()));
+                throw new BadRequestException(
+                        String.format(Locale.ROOT, msg.getDROP_REFERENCED_MODEL(), cubeDesc.getName()));
             }
         }
 
-        getMetadataManager().dropModel(desc);
-
-        accessService.clean(desc, true);
+        getDataModelManager().dropModel(desc);
     }
 
     public boolean isTableInAnyModel(TableDesc table) {
-        return getMetadataManager().isTableInAnyModel(table);
+        return getDataModelManager().isTableInAnyModel(table);
     }
 
     public boolean isTableInModel(TableDesc table, String project) throws IOException {
-        return getMetadataManager().getModelsUsingTable(table, project).size() > 0;
+        return getDataModelManager().getModelsUsingTable(table, project).size() > 0;
     }
 
     public List<String> getModelsUsingTable(TableDesc table, String project) throws IOException {
-        return getMetadataManager().getModelsUsingTable(table, project);
+        return getDataModelManager().getModelsUsingTable(table, project);
     }
 
     public Map<TblColRef, Set<CubeInstance>> getUsedDimCols(String modelName, String project) {
@@ -212,88 +216,6 @@ public class ModelService extends BasicService {
             }
         }
         return ret;
-    }
-
-    /**
-     * check if the computed column expressions are valid ( in hive)
-     */
-    public boolean checkCCExpression(final DataModelDesc dataModelDesc, String project) throws IOException {
-
-        dataModelDesc.setDraft(false);
-        if (dataModelDesc.getUuid() == null)
-            dataModelDesc.updateRandomUuid();
-
-        dataModelDesc.init(getConfig(), getMetadataManager().getAllTablesMap(project),
-                getMetadataManager().listDataModels());
-
-        for (ComputedColumnDesc cc : dataModelDesc.getComputedColumnDescs()) {
-
-            //check by calcite parser
-            cc.simpleParserCheck(cc.getExpression(), dataModelDesc.getAliasMap().keySet());
-
-            //check by hive cli, this could be slow
-            StringBuilder sb = new StringBuilder();
-            sb.append("select ");
-            sb.append(cc.getExpression());
-            sb.append(" ");
-            JoinedFlatTable.appendJoinStatement(new IJoinedFlatTableDesc() {
-                @Override
-                public String getTableName() {
-                    return null;
-                }
-
-                @Override
-                public DataModelDesc getDataModel() {
-                    return dataModelDesc;
-                }
-
-                @Override
-                public List<TblColRef> getAllColumns() {
-                    return null;
-                }
-
-                @Override
-                public int getColumnIndex(TblColRef colRef) {
-                    return 0;
-                }
-
-                @Override
-                public SegmentRange getSegRange() {
-                    return null;
-                }
-
-                @Override
-                public TblColRef getDistributedBy() {
-                    return null;
-                }
-
-                @Override
-                public TblColRef getClusterBy() {
-                    return null;
-                }
-
-                @Override
-                public ISegment getSegment() {
-                    return null;
-                }
-            }, sb, false);
-            sb.append(" limit 0");
-
-            final HiveCmdBuilder hiveCmdBuilder = new HiveCmdBuilder();
-            hiveCmdBuilder.addStatement(sb.toString());
-
-            long ts = System.currentTimeMillis();
-            Pair<Integer, String> response = KylinConfig.getInstanceFromEnv().getCliCommandExecutor()
-                    .execute(hiveCmdBuilder.toString());
-            logger.debug("Spent " + (System.currentTimeMillis() - ts)
-                    + " ms to execute the hive command to validate computed column expression: " + cc.getExpression());
-            if (response.getFirst() != 0) {
-                throw new IllegalArgumentException("The expression " + cc.getExpression()
-                        + " failed syntax check with output message: " + response.getSecond());
-            }
-        }
-
-        return true;
     }
 
     private List<String> getModelCols(DataModelDesc model) {
@@ -360,12 +282,12 @@ public class ModelService extends BasicService {
     private String checkIfBreakExistingCubes(DataModelDesc dataModelDesc, String project) throws IOException {
         String modelName = dataModelDesc.getName();
         List<CubeInstance> cubes = cubeService.listAllCubes(null, project, modelName, true);
-        DataModelDesc originDataModelDesc = listAllModels(modelName, project, true).get(0);
+        List<DataModelDesc> historyModels = listAllModels(modelName, project, true);
 
         StringBuilder checkRet = new StringBuilder();
-        if (cubes != null && cubes.size() != 0) {
-            dataModelDesc.init(getConfig(), getMetadataManager().getAllTablesMap(dataModelDesc.getProject()),
-                    getMetadataManager().listDataModels());
+        if (cubes != null && cubes.size() != 0 && !historyModels.isEmpty()) {
+            dataModelDesc.init(getConfig(), getTableManager().getAllTablesMap(project),
+                    getDataModelManager().getModels(project), false);
 
             List<String> curModelDims = getModelCols(dataModelDesc);
             List<String> curModelMeasures = getModelMeasures(dataModelDesc);
@@ -394,6 +316,7 @@ public class ModelService extends BasicService {
                 checkRet.append("\r\n");
             }
 
+            DataModelDesc originDataModelDesc = historyModels.get(0);
             if (!dataModelDesc.getRootFactTable().equals(originDataModelDesc.getRootFactTable()))
                 checkRet.append("Root fact table can't be modified. \r\n");
 
@@ -417,13 +340,14 @@ public class ModelService extends BasicService {
             logger.info("Model name should not be empty.");
             throw new BadRequestException(msg.getEMPTY_MODEL_NAME());
         }
-        if (!StringUtils.containsOnly(modelName, VALID_MODELNAME)) {
-            logger.info("Invalid Model name {}, only letters, numbers and underline supported.", modelDesc.getName());
-            throw new BadRequestException(String.format(msg.getINVALID_MODEL_NAME(), modelName));
+        if (!ValidateUtil.isAlphanumericUnderscore(modelName)) {
+            logger.info("Invalid model name {}, only letters, numbers and underscore supported.", modelDesc.getName());
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getINVALID_MODEL_NAME(), modelName));
         }
     }
 
     public DataModelDesc updateModelToResourceStore(DataModelDesc modelDesc, String projectName) throws IOException {
+
         aclEvaluate.checkProjectWritePermission(projectName);
         Message msg = MsgPicker.getMsg();
 
@@ -448,21 +372,20 @@ public class ModelService extends BasicService {
         }
 
         if (!modelDesc.getError().isEmpty()) {
-            throw new BadRequestException(String.format(msg.getBROKEN_MODEL_DESC(), modelDesc.getName()));
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getBROKEN_MODEL_DESC(), modelDesc.getName()));
         }
 
         return modelDesc;
     }
 
     public DataModelDesc getModel(final String modelName, final String projectName) throws IOException {
-        ProjectInstance project = (null != projectName) ? getProjectManager().getProject(projectName) : null;
-        if (null == project) {
+        if (null == projectName) {
             aclEvaluate.checkIsGlobalAdmin();
         } else {
-            aclEvaluate.hasProjectReadPermission(project);
+            aclEvaluate.checkProjectReadPermission(projectName);
         }
 
-        return getMetadataManager().getDataModelDesc(modelName);
+        return getDataModelManager().getDataModelDesc(modelName);
     }
 
     public Draft getModelDraft(String modelName, String projectName) throws IOException {
@@ -473,11 +396,10 @@ public class ModelService extends BasicService {
     }
 
     public List<Draft> listModelDrafts(String modelName, String projectName) throws IOException {
-        ProjectInstance project = (null != projectName) ? getProjectManager().getProject(projectName) : null;
-        if (null == project) {
+        if (null == projectName) {
             aclEvaluate.checkIsGlobalAdmin();
         } else {
-            aclEvaluate.hasProjectReadPermission(project);
+            aclEvaluate.checkProjectReadPermission(projectName);
         }
 
         List<Draft> result = new ArrayList<>();
@@ -486,7 +408,7 @@ public class ModelService extends BasicService {
             RootPersistentEntity e = d.getEntity();
             if (e instanceof DataModelDesc) {
                 DataModelDesc m = (DataModelDesc) e;
-                if (modelName == null || modelName.equals(m.getName()))
+                if (StringUtils.isEmpty(modelName) || modelName.equals(m.getName()))
                     result.add(d);
             }
         }

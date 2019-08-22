@@ -57,7 +57,7 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
 
         @Override
         public MeasureType<List<ByteArray>> createMeasureType(String funcName, DataType dataType) {
-            return new RawMeasureType(funcName, dataType);
+            return new RawMeasureType();
         }
 
         @Override
@@ -76,11 +76,7 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
         }
     }
 
-    @SuppressWarnings("unused")
-    private final DataType dataType;
-
-    public RawMeasureType(String funcName, DataType dataType) {
-        this.dataType = dataType;
+    public RawMeasureType() {
     }
 
     public void validate(FunctionDesc functionDesc) throws IllegalArgumentException {
@@ -127,6 +123,11 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
                 return valueList;
             }
 
+            @Override
+            public void reset() {
+
+            }
+
             //merge measure dictionary
             @Override
             public List<ByteArray> reEncodeDictionary(List<ByteArray> value, MeasureDesc measureDesc, Map<TblColRef, Dictionary<String>> oldDicts, Map<TblColRef, Dictionary<String>> newDicts) {
@@ -148,7 +149,7 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
                         newId = mergedDict.getIdFromValue(v);
                     }
                     BytesUtil.writeUnsigned(newId, newIdBuf, bufOffset, mergedDict.getSizeOfId());
-                    c.set(newIdBuf, bufOffset, mergedDict.getSizeOfId());
+                    c.reset(newIdBuf, bufOffset, mergedDict.getSizeOfId());
                     bufOffset += mergedDict.getSizeOfId();
                 }
                 return value;

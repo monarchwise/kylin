@@ -38,13 +38,19 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 
 public class JsonUtil {
 
+    private JsonUtil() {
+        throw new IllegalStateException("Class JsonUtil is an utility class !");
+    }
+
     // reuse the object mapper to save memory footprint
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final ObjectMapper indentMapper = new ObjectMapper();
+    private static final ObjectMapper typeMapper = new ObjectMapper();
 
     static {
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         indentMapper.configure(SerializationFeature.INDENT_OUTPUT, true);
+        typeMapper.enableDefaultTyping();
     }
 
     public static <T> T readValue(File src, Class<T> valueType)
@@ -72,6 +78,11 @@ public class JsonUtil {
         return mapper.readValue(src, valueType);
     }
 
+    public static <T> T readValue(String content, TypeReference<T> valueTypeRef)
+            throws IOException, JsonParseException, JsonMappingException {
+        return mapper.readValue(content, valueTypeRef);
+    }
+
     public static Map<String, String> readValueAsMap(String content) throws IOException {
         TypeReference<HashMap<String, String>> typeRef = new TypeReference<HashMap<String, String>>() {
         };
@@ -80,6 +91,10 @@ public class JsonUtil {
 
     public static JsonNode readValueAsTree(String content) throws IOException {
         return mapper.readTree(content);
+    }
+
+    public static <T> T readValueWithTyping(InputStream src, Class<T> valueType) throws IOException {
+        return typeMapper.readValue(src, valueType);
     }
 
     public static void writeValueIndent(OutputStream out, Object value)
@@ -104,4 +119,7 @@ public class JsonUtil {
         return indentMapper.writeValueAsString(value);
     }
 
+    public static void writeValueWithTyping(OutputStream out, Object value) throws IOException {
+        typeMapper.writeValue(out, value);
+    }
 }

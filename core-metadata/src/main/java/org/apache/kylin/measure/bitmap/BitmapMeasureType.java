@@ -52,7 +52,7 @@ public class BitmapMeasureType extends MeasureType<BitmapCounter> {
 
         @Override
         public MeasureType<BitmapCounter> createMeasureType(String funcName, DataType dataType) {
-            return new BitmapMeasureType(funcName, dataType);
+            return new BitmapMeasureType();
         }
 
         @Override
@@ -71,10 +71,7 @@ public class BitmapMeasureType extends MeasureType<BitmapCounter> {
         }
     }
 
-    public DataType dataType;
-
-    public BitmapMeasureType(String funcName, DataType dataType) {
-        this.dataType = dataType;
+    public BitmapMeasureType() {
     }
 
     @Override
@@ -126,25 +123,8 @@ public class BitmapMeasureType extends MeasureType<BitmapCounter> {
 
             @Override
             public BitmapCounter reEncodeDictionary(BitmapCounter value, MeasureDesc measureDesc, Map<TblColRef, Dictionary<String>> oldDicts, Map<TblColRef, Dictionary<String>> newDicts) {
-                if (!needDictionaryColumn(measureDesc.getFunction())) {
-                    return value;
-                }
-                TblColRef colRef = measureDesc.getFunction().getParameter().getColRefs().get(0);
-                Dictionary<String> sourceDict = oldDicts.get(colRef);
-                Dictionary<String> mergedDict = newDicts.get(colRef);
-
-                BitmapCounter retValue = factory.newBitmap();
-                for (int id : value) {
-                    int newId;
-                    String v = sourceDict.getValueFromId(id);
-                    if (v == null) {
-                        newId = mergedDict.nullId();
-                    } else {
-                        newId = mergedDict.getIdFromValue(v);
-                    }
-                    retValue.add(newId);
-                }
-                return retValue;
+                //BitmapCounter needn't reEncode
+                return value;
             }
 
             @Override
@@ -171,6 +151,9 @@ public class BitmapMeasureType extends MeasureType<BitmapCounter> {
     // In order to keep compatibility with old version, tinyint/smallint/int column use value directly, without dictionary
     private boolean needDictionaryColumn(FunctionDesc functionDesc) {
         DataType dataType = functionDesc.getParameter().getColRefs().get(0).getType();
+        if (functionDesc.isMrDict()) {
+            return false;
+        }
         if (dataType.isIntegerFamily() && !dataType.isBigInt()) {
             return false;
         }

@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.util.List;
 
 import org.apache.kylin.common.util.Dictionary;
+import org.apache.kylin.metadata.datatype.DataType;
 
 import com.google.common.collect.Lists;
 
@@ -30,20 +31,17 @@ import com.google.common.collect.Lists;
  */
 @SuppressWarnings("rawtypes")
 public class MultipleDictionaryValueEnumerator implements IDictionaryValueEnumerator {
-    private int curDictIndex = 0;
-    private Dictionary<String> curDict;
-    private int curKey;
+    private List<Integer> curKeys = Lists.newArrayList();
     private String curValue = null;
     private List<Dictionary<String>> dictionaryList;
+    private DataType dataType;
 
-    public MultipleDictionaryValueEnumerator(List<DictionaryInfo> dictionaryInfoList) {
+    public MultipleDictionaryValueEnumerator(DataType dataType, List<Dictionary<String>> dictionaryInfoList) {
+        this.dataType = dataType;
         dictionaryList = Lists.newArrayListWithCapacity(dictionaryInfoList.size());
-        for (DictionaryInfo dictInfo : dictionaryInfoList) {
-            dictionaryList.add((Dictionary<String>) dictInfo.getDictionaryObject());
-        }
-        if (!dictionaryList.isEmpty()) {
-            curDict = dictionaryList.get(0);
-            curKey = curDict.getMinId();
+        for (Dictionary<String> dict : dictionaryInfoList) {
+            dictionaryList.add(dict);
+            curKeys.add(dict.getMinId());
         }
     }
 
@@ -54,22 +52,34 @@ public class MultipleDictionaryValueEnumerator implements IDictionaryValueEnumer
 
     @Override
     public boolean moveNext() throws IOException {
-        while (curDictIndex < dictionaryList.size()) {
-            if (curKey <= curDict.getMaxId()) {
-                curValue = curDict.getValueFromId(curKey);
-                curKey ++;
+        String minValue = null;
+        int curDictIndex = 0;
 
-                return true;
-            }
+        // multi-merge dictionary forest
+        for (int i = 0; i < dictionaryList.size(); i++) {
+            Dictionary<String> dict = dictionaryList.get(i);
+            if (dict == null)
+                continue;
 
-            // move to next dict if exists
-            if (++curDictIndex < dictionaryList.size()) {
-                curDict = dictionaryList.get(curDictIndex);
-                curKey = curDict.getMinId();
+            int curKey = curKeys.get(i);
+            if (curKey > dict.getMaxId())
+                continue;
+
+            String curValue = dict.getValueFromId(curKey);
+            if (minValue == null || dataType.compare(minValue, curValue) > 0) {
+                minValue = curValue;
+                curDictIndex = i;
             }
         }
-        curValue = null;
-        return false;
+
+        if (minValue == null) {
+            curValue = null;
+            return false;
+        }
+
+        curValue = minValue;
+        curKeys.set(curDictIndex, curKeys.get(curDictIndex) + 1);
+        return true;
     }
 
     @Override

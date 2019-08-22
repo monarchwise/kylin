@@ -21,10 +21,11 @@ package org.apache.kylin.common.persistence;
 import java.io.Serializable;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
-import java.util.UUID;
+import java.util.Locale;
 
 import org.apache.commons.lang.time.FastDateFormat;
 import org.apache.kylin.common.KylinVersion;
+import org.apache.kylin.common.util.RandomUtil;
 
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import com.fasterxml.jackson.annotation.JsonAutoDetect.Visibility;
@@ -45,7 +46,7 @@ abstract public class RootPersistentEntity implements AclEntity, Serializable {
 
     static final String DATE_PATTERN = "yyyy-MM-dd HH:mm:ss z";
     static FastDateFormat format = FastDateFormat.getInstance(DATE_PATTERN);
-    static DateFormat df = new SimpleDateFormat(DATE_PATTERN);
+    static DateFormat df = new SimpleDateFormat(DATE_PATTERN, Locale.ROOT);
 
     public static String formatTime(long millis) {
         return format.format(millis);
@@ -58,6 +59,9 @@ abstract public class RootPersistentEntity implements AclEntity, Serializable {
 
     @JsonProperty("last_modified")
     protected long lastModified;
+
+    // if cached and shared, the object MUST NOT be modified (call setXXX() for example)
+    protected boolean isCachedAndShared = false;
 
     /**
      * Metadata model version
@@ -96,7 +100,24 @@ abstract public class RootPersistentEntity implements AclEntity, Serializable {
     }
 
     public void updateRandomUuid() {
-        setUuid(UUID.randomUUID().toString());
+        setUuid(RandomUtil.randomUUID().toString());
+    }
+
+    public boolean isCachedAndShared() {
+        return isCachedAndShared;
+    }
+
+    public void setCachedAndShared(boolean isCachedAndShared) {
+        this.isCachedAndShared = isCachedAndShared;
+    }
+
+    /**
+     * The name as a part of the resource path used to save the entity.
+     * 
+     * E.g. /resource-root-dir/{RESOURCE_NAME}.json
+     */
+    public String resourceName() {
+        return uuid;
     }
 
     @Override
